@@ -65,11 +65,13 @@ void report_cblas_probe() {
                 kv.second.cnt ? (double)kv.second.ns / kv.second.cnt / 1000.0 : 0.0);
     }
 }
+#ifdef __APPLE__
+// Apple-only: 强符号劫持 cblas_sgemm 统计 GEMM(GEMM 探针)。
+// 非 Apple(x86 Linux/DCU)平台不劫持: CBLAS_ORDER/CBLAS_TRANSPOSE 类型不存在, matmul 走项目 SIMD 后端。
 void cblas_sgemm(const enum CBLAS_ORDER __Order, const enum CBLAS_TRANSPOSE __TransA,
                  const enum CBLAS_TRANSPOSE __TransB, const int __M, const int __N, const int __K,
                  const float __alpha, const float* __A, const int __lda, const float* __B,
                  const int __ldb, const float __beta, float* __C, const int __ldc) {
-#ifdef __APPLE__
     static auto real = (void (*)(enum CBLAS_ORDER, enum CBLAS_TRANSPOSE, enum CBLAS_TRANSPOSE,
                                  int, int, int, float, const float*, int, const float*, int,
                                  float, float*, int))dlsym(RTLD_NEXT, "cblas_sgemm");
@@ -79,11 +81,8 @@ void cblas_sgemm(const enum CBLAS_ORDER __Order, const enum CBLAS_TRANSPOSE __Tr
     auto ns = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
         std::chrono::steady_clock::now() - t0).count();
     record_cblas_probe(__M, __N, (int)__TransA, (int)__TransB, ns);
-#else
-    (void)__Order;(void)__TransA;(void)__TransB;(void)__M;(void)__N;(void)__K;
-    (void)__alpha;(void)__A;(void)__lda;(void)__B;(void)__ldb;(void)__beta;(void)__C;(void)__ldc;
-#endif
 }
+#endif  // __APPLE__
 }  // extern "C"
 
 static void crashHandler(int sig) {
