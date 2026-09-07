@@ -19,6 +19,12 @@
 #include <cstring>
 #include <execinfo.h>
 #include <unistd.h>
+#ifdef __APPLE__
+#include <dlfcn.h>
+#endif
+#include <atomic>
+#include <mutex>
+#include <unordered_map>
 #include "Tensor.h"
 #include "AutoGrad.h"
 #include "CtorchScheduler.h"
@@ -30,6 +36,55 @@
 
 extern "C" void cblas_saxpy(const int N, const float alpha, const float *X, const int incX,
                             float *Y, const int incY);
+
+// ===== cblas_sgemm 强符号劫持 probe(与 test_c3_mnist_train 同款) =====
+namespace ctprobe {
+    struct Bucket { uint64_t ns = 0; uint64_t cnt = 0; };
+    std::mutex& mu() { static std::mutex m; return m; }
+    std::unordered_map<uint64_t, Bucket>& map() { static std::unordered_map<uint64_t, Bucket> m; return m; }
+    std::atomic<bool>& on() { static std::atomic<bool> e{false}; return e; }
+}
+extern "C" {
+void record_cblas_probe(int M, int N, int tA, int tB, unsigned long long ns) {
+    if (!ctprobe::on().load(std::memory_order_relaxed)) return;
+    uint64_t key = ((uint64_t)(uint32_t)M << 40) | ((uint64_t)(uint32_t)N << 16)
+                 | ((uint64_t)(uint32_t)tA << 8) | (uint32_t)tB;
+    std::lock_guard<std::mutex> lk(ctprobe::mu());
+    auto& b = ctprobe::map()[key];
+    b.ns += ns; b.cnt++;
+}
+void report_cblas_probe() {
+    std::lock_guard<std::mutex> lk(ctprobe::mu());
+    fprintf(stderr, "[FFN-CBLAS] bucket(M,N,tA,tB):\n");
+    for (auto& kv : ctprobe::map()) {
+        uint64_t M = (kv.first >> 40) & 0xFFFFFFFF, N = (kv.first >> 16) & 0xFFFFFF;
+        int tA = (kv.first >> 8) & 0xFF, tB = kv.first & 0xFF;
+        fprintf(stderr, "[FFN-CBLAS] M=%llu N=%llu tA=%d tB=%d total_us=%llu count=%llu avg_us=%.3f\n",
+                (unsigned long long)M, (unsigned long long)N, tA, tB,
+                (unsigned long long)(kv.second.ns / 1000), (unsigned long long)kv.second.cnt,
+                kv.second.cnt ? (double)kv.second.ns / kv.second.cnt / 1000.0 : 0.0);
+    }
+}
+void cblas_sgemm(const enum CBLAS_ORDER __Order, const enum CBLAS_TRANSPOSE __TransA,
+                 const enum CBLAS_TRANSPOSE __TransB, const int __M, const int __N, const int __K,
+                 const float __alpha, const float* __A, const int __lda, const float* __B,
+                 const int __ldb, const float __beta, float* __C, const int __ldc) {
+#ifdef __APPLE__
+    static auto real = (void (*)(enum CBLAS_ORDER, enum CBLAS_TRANSPOSE, enum CBLAS_TRANSPOSE,
+                                 int, int, int, float, const float*, int, const float*, int,
+                                 float, float*, int))dlsym(RTLD_NEXT, "cblas_sgemm");
+    if (!real) return;
+    auto t0 = std::chrono::steady_clock::now();
+    real(__Order, __TransA, __TransB, __M, __N, __K, __alpha, __A, __lda, __B, __ldb, __beta, __C, __ldc);
+    auto ns = (unsigned long long)std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now() - t0).count();
+    record_cblas_probe(__M, __N, (int)__TransA, (int)__TransB, ns);
+#else
+    (void)__Order;(void)__TransA;(void)__TransB;(void)__M;(void)__N;(void)__K;
+    (void)__alpha;(void)__A;(void)__lda;(void)__B;(void)__ldb;(void)__beta;(void)__C;(void)__ldc;
+#endif
+}
+}  // extern "C"
 
 static void crashHandler(int sig) {
     void* arr[64];
@@ -55,6 +110,7 @@ static void fill(Tensor& t, float seed) {
 int main(int argc, char** argv) {
     signal(SIGSEGV, crashHandler);
     signal(SIGABRT, crashHandler);
+    ctprobe::on().store(std::getenv("FFN_CBLAS_PROBE") != nullptr);
     if (argc >= 5) {
         BS = (size_t)std::atoll(argv[1]); HID = (size_t)std::atoll(argv[2]);
         INT = (size_t)std::atoll(argv[3]); STEPS = (size_t)std::atoll(argv[4]);
@@ -176,6 +232,7 @@ int main(int argc, char** argv) {
                 bw.mimo_miss_count, (unsigned long long)bw.mimo_exec_us);
     }
 #endif
+    report_cblas_probe();
     C3Engine::getInstance().shutdown();
     return 0;
 }

@@ -212,6 +212,12 @@ void ComputeCore::backward(std::shared_ptr<Node> root, bool retainGraph) {
     // 修复: 从 root 反向 DFS 得活跃子图, 按"活跃下游数"重算每个节点的 _count,
     // 排除死分支的 increase。无死分支时重算结果与注册时一致, 行为不变。
     {
+        // [perf 诊断] env CT_DISABLE_ACTIVE_RESET=1 关闭活跃子图重算, 用于 A/B 测 DFS 开销
+        static const bool active_reset_enabled = [] {
+            const char* e = std::getenv("CT_DISABLE_ACTIVE_RESET");
+            return !(e && std::string(e) == "1");
+        }();
+        if (active_reset_enabled) {
         std::unordered_set<Node*> active;
         std::function<void(Node*)> dfs = [&](Node* n) {
             if (!n || active.count(n)) return;
@@ -228,6 +234,7 @@ void ComputeCore::backward(std::shared_ptr<Node> root, bool retainGraph) {
                     up->setCount(up->getCount() + 1);
                 }
             }
+        }
         }
     }
     addReadyNode(root);
