@@ -32,12 +32,21 @@
 
 ## 🔧 下一步待办 (2026-09-06)
 
-1. **batched GEMM 合并压 FFN backward**: transpose folding 已生效(probe 证实 tA/tB=112),
-   GEMM ~370 GFLOP/s 近 M3 上限; 唯一结构性空间 = 权重预拼接把 grad_W_g/grad_W_u 等合并成大 GEMM。
+0. **部署时自适应校准(新设计)**: GEMM 合并/线程/opt-level/向量宽等**硬件相关决策**不应拍板或特化。
+   探针(M3)证实 GEMM 合并在 M=64..2048 全程不占优, 但跨硬件会分化。
+   → 设计 `docs/C3_DEPLOY_AUTOTUNE_DESIGN.md`(机器性能指纹, 首跑校准持久化)。实现前先批 scope。
+1. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策改走第 0 条自适应校准。
 2. **修 pre-existing standalone 失败**: test_c3_pgo_deopt/compile_error 已修绿; 仍红 = test_relu_backward
    (MPS 设备类型崩溃, 不经 C3)、test_region_fusion(性能退化, bench 波动类)。
-3. DCU 节点验证 + x86 AVX-512 实测 (曙光智算, 机时充足)。
+3. DCU 节点验证 + x86 AVX-512 实测 (曙光智算, 机时充足; 正好验证自适应校准的跨机分化)。
 4. forward 优化 + RC2 进程级异步 (c3d, docs/C3_PROCESS_ASYNC_*)。
+
+## 设计蓝图 (docs/, 多未实现)
+
+- `docs/C3_DEPLOY_AUTOTUNE_DESIGN.md` — 部署时自适应校准(机器指纹, 跨硬件决策) 【新增 2026-09-07】
+- `docs/C3_PROCESS_ASYNC_BLUEPRINT.md` — RC2 进程级异步 c3d
+- `docs/C3_SIMD_CROSSARCH_BLUEPRINT.md` — x86 AVX-512/NEON 跨架构向量化
+- 其余 `docs/C3_*.md` 为 bug 报告/论文素材(DEBT2/first-call/paper/perf 等)
 
 ## 关键路径速查
 
