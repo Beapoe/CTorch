@@ -1747,3 +1747,26 @@ C3 default / C3_DISABLE_HOTPATH=1 / C3_DISABLE_REGION_FUSION=1。带 SIGSEGV bac
 ### 回归
 graph 115/backward 0 diff/mnist_step/sum_mean_grad(18)/fused_bw 全绿;
 mnist 稳态 138.4ms acc 97.1421% 无回退。
+
+## 4.60 2026-09-07 buildGt + Linalg OneShot 广播泛化修复(c3 0e8cdf1, 已 push)
+
+§4.56/4.57 审查遗留的 2 处真实 bug, 本轮修掉:
+
+1. **buildGt 单节点只读 rhs[0] (MLIRKernelGen.cpp)**
+   - 原实现把 rhs 当恒标量(ReLU 阈值类)读 rhs[0]; 逐元素向量比较(Gt)会被错读。
+   - 修: buildGt 增 `bool rhs_scalar` 形参, 由 `GtNode.rhs_desc` 判定 numel==1 → 循环外读一次;
+     否则循环内按 index 读 rhs[i], 泛化非标量比较。单节点调用点(约 L1776)同步推导传入。
+   - 标量路径(既有 ReLU/阈值)语义不变, 零回归。
+
+2. **Linalg OneShot ABI 广播门限过松 (LinalgFusedGen.cpp)**
+   - 隐患: OneShot 后端把每个入参当 **1D 全长 n 的 identity memref**, 按迭代索引逐位读。
+     旧 `isBroadcastableTo` 门允许 size-1/短输入通过(如 {1}→{n}), 会对 1 元素缓冲越界读 n 次。
+   - 修: 在 shape 可广播之外, 追加「每个节点 out numel == 输出 numel」硬门限。
+     标量/短缓冲(真广播需仿射映射而非 identity ABI)一律不进 OneShot;
+     纯逐元素等 numel 扁平图不受影响。OneShot 默认 env `C3_LINALG_ONESHOT=1` 才启用, 此门限为纵深防御。
+
+### 回归 (全绿, 已提交并 push 两仓)
+- c3 `0e8cdf1` (feature-dcu-optimize) ← 本改动
+- main `278f59e` (feature-DCU) ← bump c3
+- test_c3_graph 115 / test_sum_mean_grad 18 / test_c3_backward max_diff=0 /
+  test_graph_merger 13 / test_c3_mnist_step PASS / FFN bench MIMO hit=10 无崩溃
