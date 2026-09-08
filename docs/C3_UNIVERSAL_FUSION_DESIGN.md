@@ -156,3 +156,36 @@ autotune 机器指纹校准后的阈值(§关联)。收益不足就不并——�
 - `docs/C3_REGION_FUSION_SILU.md` / `docs/C3_FUSED_BACKWARD_DEBT2_*` — 现有融合演进史。
 - 上一轮修复记录: `STATUS_CONTEXT.md` §4.60(buildGt + Linalg OneShot 广播, c3 0e8cdf1)
   —— 两处特判正是本设计要"集中到传播层"的判据实例。
+
+---
+
+## 9. 实现进度与实测 (2026-09-07)
+
+### L1-1 已落地: FusionPlanner 判据层 (c3 83300d2 / main 0947e4b)
+`FusionPlanner::planUnits(Graph)` → 融合单元集, 纯函数只读, 判据数据驱动(非按名特判):
+逐元素等 numel 共内核; MatMul 吸收单消费者尾链 → GEMM_EPILOGUE; 多消费者 / 双 GEMM /
+numel 不一致一律割。5 单测全绿(逐元素链 / GEMM epilogue / 扇出割 / numel 割 / 共享 GEMM 不并)。
+未接管热路径。配套诊断 env `C3_PLANNER_DIAG=1`(真实 FFN fused_graph 上量化 planner 输出)。
+
+### L2 关键实测: MIMO ≠ planner 默认模型 (诊断证据)
+在 `compileFFNMIMOBackwardAsync` 真实 fused_graph(34 节点, 9 输出)上跑默认 planner 得到:
+
+```
+[PLANNER-DIAG] FFN-MIMO graph nodes=34 compute_units=9:
+  [ELEM n=4 Neg Exp Add Div] [GEMM] [GEMM] [ELEM n=6 Mul Sub Mul Mul Add Mul]
+  [ELEM n=1 Mul] [GEMM] [GEMM] [GEMM] [GEMM]
+```
+
+**结论**: MIMO 是「单内核多输出 region」——一次算共享中间量 grad_h/grad_g/grad_u/grad_gate_pre,
+喂给 6 个 GEMM 分支 + 3 段逐元素链, 写 9 个 grad; 靠**共享中间量不落内存** + 省 8 次 launch 取胜。
+而 planner 默认「多消费者中间量必物化割开 / 双 GEMM 不并」正好把该 region 切成 9 个单元——
+两模型目标相反。故前向单 GEMM 单元策略**不能**直接搬到 backward。
+
+### 下一步定义: region-kernel 策略 (backward 方向)
+planner 需增一种单元策略 `REGION_KERNEL`: 对**连通** backward 区段(共享中间量仅在本区段内复用),
+允许整个连通计算分量作**一个多输出内核**, 是否采纳由**代价门**决定:
+- 收益 = 省掉的中间量落内存(Σ 各共享中间 numel) + 省掉的 (GEMM数+链数-1) 次 launch;
+- 代价 = 单内核寄存器/调度压力; 阈值走 autotune 指纹, 不写死。
+- 与现 MIMO 运行时的关系: 该策略是 MIMO 目录的**通用替代**; 因触碰训练正确性核心,
+  落地需分两步: (1) 先在 planner 加 `REGION_KERNEL` 判据 + 单测(用真实 fused_graph 拓扑,
+  非按名特判, 复现"连通→1 单元"), (2) 验证后经决策门再考虑接管 `compileFFNMIMOBackwardAsync`。
