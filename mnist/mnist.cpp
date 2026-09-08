@@ -10,7 +10,12 @@
 #include <chrono>
 
 static ctQALS::rng::Xoshiro256PlusPlus g_mnist_rng(42);
+#ifdef __APPLE__
 static DeviceType g_device = DeviceType::kMPS;
+#else
+// MPS is a macOS-only backend; use the CPU path on Linux/DCU builds.
+static DeviceType g_device = DeviceType::kCPU;
+#endif
 
 // 两隐藏层 MLP: 784 -> 256(ReLU) -> 128(ReLU) -> 10
 class NeuralNetwork {
@@ -87,6 +92,7 @@ public:
     
     void update_parameters() {
         float lr = learning_rate;
+#ifdef __APPLE__
         if (g_device == DeviceType::kMPS) {
             // 把 6 个参数的 SGD+zero 合并到一个 command buffer，只 wait 一次。
             MPS_flush_wait(true);
@@ -98,7 +104,9 @@ public:
             SGD_Step_Zero_MPS_kernel(W3, W3.grad(), lr);
             SGD_Step_Zero_MPS_kernel(b3, b3.grad(), lr);
             MPS_update_end();
-        } else {
+        } else
+#endif
+        {
             auto sgd_step = [this, lr](Tensor& param) {
                 float* gp = param.grad_ptr();
                 float* p = param.data_write<float>();
