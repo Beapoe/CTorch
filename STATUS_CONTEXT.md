@@ -1770,3 +1770,30 @@ mnist 稳态 138.4ms acc 97.1421% 无回退。
 - main `278f59e` (feature-DCU) ← bump c3
 - test_c3_graph 115 / test_sum_mean_grad 18 / test_c3_backward max_diff=0 /
   test_graph_merger 13 / test_c3_mnist_step PASS / FFN bench MIMO hit=10 无崩溃
+
+## 4.61 2026-09-07 通用图融合: FusionPlanner 判据层落地 (L1-1, c3 83300d2, 已 push)
+
+按 docs/C3_UNIVERSAL_FUSION_DESIGN.md 的 L1 前半落地判据层（仅判据, 未接管热路径）。
+
+- `FusionPlanner::planUnits(Graph)` → 融合单元集；纯函数、只读、不触发编译。
+  判据全数据驱动、非按结构名特判：
+  1. lowering 能力: 逐元素族(Add/Sub/Mul/Div/Neg/ReLU/Sig/Tanh/Gt/Exp/Log)可共内核;
+     MatMul 吸收单消费者逐元素尾链 → GEMM_EPILOGUE; SumReduce/Transpose/Softmax/
+     CrossEntropy/Fused/Const 为物化边界(LEAF)。
+  2. shape/numel: 纯逐元素要求成员 out numel 全等(identity-1D ABI 门, 同 OneShot 收紧);
+     GEMM 尾链须 == GEMM 输出 numel。
+  3. 依赖割: 生产者多消费者必须物化; 双 GEMM 不并(共享 GEMM 负收益已证)。
+  保守方向——不确定即割开, 保证正确性零回归。
+- 配套 5 单测 test_fusion_planner: 逐元素链单单元 / GEMM epilogue / 扇出割 /
+  numel 割 / 共享 GEMM 不并, 全绿。
+
+### 架构前提核实(决定热路径怎么接, 落地前已确认)
+forward 目前**无跨多 op 通用整图 DAG 捕获**: compile(Graph) 主要服务 backward/merged;
+forward 是 dispatch 级线性 region(C3HotPathManager checkPattern)。故「planner 事后判定
+复现 forward 命中」需先有 forward 整图捕获层(捕获一次 forward 的 Graph), 才可与
+checkPattern 对照并接管。此为 L1 后半的前置, 待洛锦定夺。
+
+### 回归 (全绿)
+c3 `83300d2`(feature-dcu-optimize); main `0947e4b`(feature-DCU, bump c3 + CMake + 单测)。
+test_fusion_planner 5 / test_c3_graph 115 / test_graph_merger 13 / sum_mean_grad /
+c3_backward max_diff=0 / mnist_step 全 PASS。
