@@ -53,6 +53,8 @@ protected:
     size_t _dependencies{0};
     /** @brief 当前活跃的依赖计数 */
     std::atomic<size_t> _count{0};
+    /** @brief 构建时被下游注册引用的次数(稳定 fanout, 不随 backward 变) — 供 MIMO 等单消费者守卫 */
+    std::atomic<size_t> _downstreamCount{0};
     /** @brief 是否需要加速计算 */
     bool _requireAccelerate{false};
 public:
@@ -121,6 +123,9 @@ public:
 
     /** @brief 获取当前活跃依赖计数(下游完成倒计时) */
     [[nodiscard]] size_t getCount() const;
+
+    /** @brief 构建时被下游注册引用的次数(稳定 fanout)。MIMO 单消费者守卫用。 */
+    [[nodiscard]] size_t getDownstreamCount() const;
 
     /** @brief 获取上游节点列表（返回 const 引用，避免热路径图遍历每次拷贝） */
     [[nodiscard]] const std::vector<std::shared_ptr<Node>>& getUpStreamNodes() const;

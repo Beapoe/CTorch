@@ -12,7 +12,12 @@
 void Node::increase() {
     _count.fetch_add(1,std::memory_order_acq_rel);
     _dependencies++;
+    // [2026-09-07] 稳定 fanout: 记录被下游注册引用次数(构建期一次, 不随 backward 递减)。
+    // MIMO 反向融合等用 getDownstreamCount()==1 做"单消费者"守卫, 防多消费者共享中间丢梯度。
+    _downstreamCount.fetch_add(1, std::memory_order_acq_rel);
 }
+
+size_t Node::getDownstreamCount() const { return _downstreamCount.load(std::memory_order_acquire); }
 
 bool Node::decrease() {
     size_t old = _count.load(std::memory_order_acquire);
