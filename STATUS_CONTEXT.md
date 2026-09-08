@@ -1797,3 +1797,27 @@ checkPattern 对照并接管。此为 L1 后半的前置, 待洛锦定夺。
 c3 `83300d2`(feature-dcu-optimize); main `0947e4b`(feature-DCU, bump c3 + CMake + 单测)。
 test_fusion_planner 5 / test_c3_graph 115 / test_graph_merger 13 / sum_mean_grad /
 c3_backward max_diff=0 / mnist_step 全 PASS。
+
+## 4.62 2026-09-07 L2 实测: MIMO=region-kernel, planner 需新策略(c3 1c90111)
+
+推进通用图融合的 backward 方向(L2)。先精读 compileFFNMIMOBackwardAsync 确认:
+FFN-MIMO **本就是建在 C3 Graph 上**——GraphMerger 拼 6 子图成 34 节点/9 输出 fused_graph 再
+C3Engine::compile。故 planner 可在此真实 Graph 上运行。
+
+### 诊断 (C3_PLANNER_DIAG=1, 纯只读, 默认关闭)
+FFN-MIMO 34 节点 9 输出, 默认 planner(单 GEMM/逐元素单元模型)切成 **9 单元**:
+6 个单 GEMM + 3 段 ELEM(Neg Exp Add Div / Mul Sub Mul Mul Add Mul / Mul)。
+MIMO 仍正常命中(mimo_hit=4), 诊断零副作用。
+
+### 结论(沉淀进设计文档 §9)
+MIMO = **单内核多输出 region**: 共享中间量 grad_h/grad_g/grad_u/grad_gate_pre 只算一次,
+喂 6 个 GEMM 分支 + 3 段逐元素链, 一次写 9 个 grad。靠省中间量落内存 + 省 launch。
+planner 默认「多消费者必物化 / 双 GEMM 不并」恰把 region 切碎 → 前向单 GEMM 策略不能直搬 backward。
+
+### 下一步(待洛锦定夺, 触碰训练核心需谨慎)
+planner 加 `REGION_KERNEL` 策略: 连通 backward 区段可作一个多输出内核, 由代价门
+(省中间量+省 launch vs 寄存器压力, 阈值走 autotune)决定。落地分两步: (1) 判据+单测(用真实
+fused_graph 拓扑非按名), (2) 验证后再经决策门考虑接管 compileFFNMIMOBackwardAsync。
+
+### 回归
+c3 `1c90111`; main `08e1b35`。FFN bench(带 diag) MIMO 命中正常; 其余全绿沿用 §4.61。
