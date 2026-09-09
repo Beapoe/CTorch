@@ -108,3 +108,14 @@ C3 的许多优化决策是**硬件相关**的, 不能拍脑袋定, 也无法跨
 - `docs/C3_PERF_UNIFIED_MATRIX.md` — 性能口径
 - `c3/include/C3/C3Config.h` — 现有配置开关(校准写入的默认层之上)
 - bench: `bench_llama_ffn_train`(FFN/MIMO 对照), `test_c3_mnist_train`(cblas probe 注入式计时)
+
+## 11. 落地进度(2026-09-07): c3ctl + MachineFingerprint + 代价门桥接
+- 生命周期已定型: **c3ctl 首次部署校准 → 写 c3.fingerprint → 运行时 Engine 启动 loadDefault()
+  一次, 之后 O(1) 读**。env C3_FINGERPRINT 覆盖路径。
+- `c3ctl calibrate`: 测有效内存带宽(memcpy)+ C3 单次 launch 税(极小 kernel 反复 execute) →
+  写 launch_unit_bytes; `c3ctl show` 用 O(1) 读取路径打印验证。
+- `MachineFingerprint`(c3 单例, 线程安全): load 一次后 getter O(1); 缺失回退保守默认, 不抛异常。
+- `RegionFusionPolicy::fromMachineDefaults()`: 代价门 launch 项取自指纹。
+- 实测 M3: bandwidth≈24.6GB/s, launch_us≈0.486 → launch_unit_bytes≈12KB。
+- 下一步: 把其余决策域(GEMM 分 shape 策略/线程/opt_level)逐个并入 c3ctl 校准 + 指纹 schema 扩 JSON;
+  并把 fromMachineDefaults 接进运行时真正消费 planner 代价门的位置(待运行时接管后)。

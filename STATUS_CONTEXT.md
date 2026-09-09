@@ -1907,3 +1907,19 @@ c3 `86e84e4`; main `6537739`。均已 push。
   (launch 税低估/ws 高估)。**launch 税 autotune 校准是 G1→G3 前置**, 否则一致率恒不达标。
 - 文档 docs/C3_BACKWARD_FUSION_MIGRATION_DESIGN.md; 纯只读, 不改运行时。
 - c3 efe84c2; main 358a4d5。均已 push。
+
+## 4.69 2026-09-07 c3ctl deploy 校准 + MachineFingerprint O(1) 运行时读取(c3 6896259)
+
+按洛锦纠正的架构落地: launch 税/机器探针 = C3 首次部署 ctl 一次性校准 → 写指纹配置 →
+运行时 O(1) 读配置(非运行时临时测/开发时测)。
+
+- MachineFingerprint(c3): 指纹持久化(load 一次后 getter O(1)), 缺失回退保守默认, 不抛异常。
+  字段: bandwidth_gbps/launch_us/launch_unit_bytes 等。
+- RegionFusionPolicy::fromMachineDefaults(): 代价门 launch 项用指纹实测(未校准回退默认)。
+- tools/c3ctl: `c3ctl calibrate [--out p]`(测带宽 memcpy+launch 税 C3 极小 kernel) /
+  `c3ctl show`(模拟运行时 O(1) 读)。默认 c3.fingerprint, env C3_FINGERPRINT 覆盖。
+- 实测(M3): bandwidth=24.6GB/s, launch_us=0.486 → launch_unit_bytes≈12KB(远小于旧硬编码 400KB)。
+- BW-RECONCILE/PLANNER-DIAG 改 fromMachineDefaults: 真实 FFN launch_b=11972 仍 merged=0
+  (512KB+12KB << 25%x140MB ws) → 印证 MIMO 收益在大分量内部单内核 codegen 复用, 非跨分量。
+- 回归: mf 3 / fwd 2 / fp 12 / graph 115 / merger 13 全绿。c3.fingerprint 不入库(.gitignore)。
+- c3 6896259; main 11a17d1。均已 push。
