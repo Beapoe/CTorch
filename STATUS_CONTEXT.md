@@ -1843,3 +1843,18 @@ FFN-MIMO fused_graph: default_units=9, **region_units=2**(n=21 + n=2)。
 ### 提交
 c3 `9feb199`(RegionKernel 判据 + 诊断 region 打印); main `3eecd24`(bump + 单测 + 设计文档 §9)。
 回归: test_fusion_planner 8 / test_c3_graph 115 / test_graph_merger 13 全绿。
+
+## 4.64 2026-09-07 RegionKernel 跨分量合并代价门雏形(c3 86e84e4)
+
+L2 判据继续推进(仍 off-path, 不改运行时)。
+
+- RegionKernel 增跨分量合并代价门: RegionMergeMetric(comp/reload/ws/merged) +
+  RegionFusionPolicy.min_benefit_ratio(默认 0.25)。merged = 共享外部输入重读节省 > ratio*工作集。
+  launch 省税不计入原型(硬件相关, 终态由 autotune 指纹给出), 系数可插拔。
+- 真实 FFN 实测(诊断): comp=2 reload=524288 ws=290947072 merged=0 → 保守默认保持 2 regions。
+  **量化结论**: MIMO 单内核收益主体是 launch 省税 + 内核内向量化, 不是重读节省;
+  补 launch 项(带机器指纹)是 planner 泛化复现 MIMO 决策的最后一块, 而非再加结构特判。
+- 单测 8→10(代价门并/不并), 全绿; graph 115 / merger 13 无回退。
+
+### 提交
+c3 `86e84e4`; main `6537739`。均已 push。
