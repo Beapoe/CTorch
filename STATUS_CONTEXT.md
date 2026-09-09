@@ -1878,3 +1878,18 @@ c3 `86e84e4`; main `6537739`。均已 push。
   这正是 autotune 机器指纹该实测的量。判据层至此完整且保守。
 - 单测 11→12(峰值 live < 求和验证), 全绿; graph 115 无回退。
 - c3 a7350c1; main a5566e4。均已 push。
+
+## 4.67 2026-09-07 ForwardCapture forward 整图捕获层(c3 3a7b4ef)
+
+通用图融合 forward 前置缺口补齐。
+
+- ForwardCapture::capture(rootTensor): 从根输出沿 autograd getUpStreamNodes 上游遍历翻译成
+  c3::Graph。纯只读快照, 不触发执行/编译, 不碰 dispatch / in_autograd 红线。
+- 语义: upStream[i] 与 inputs[i] 索引对齐; requires_grad 叶=GradAccumulator(去重外部叶),
+  非 grad 常量=nullptr(每次新叶), 计算中间量递归。支持 MatMul/Add/Sub/Mul/Div/Neg/ReLU/
+  Sigmoid/Tanh/Exp/Log/Softmax/CrossEntropy; 不支持类型明确报错(不静默吞)。
+- 集成测试 test_forward_capture(真实 eager 前向 MatMul->ReLU): 捕获 4 节点/2 叶,
+  planner 自动判 GEMM_EPILOGUE; 根为叶时明确报错。
+- 意义: planner 现在有 forward 真实整图输入, 可对完整前向做 region 判定。
+- 回归: fp 12 / graph 115 / merger 13 / fwd_capture 2 全绿。
+- c3 3a7b4ef; main e83ddf7 + 9930aa4(文档)。均已 push。
