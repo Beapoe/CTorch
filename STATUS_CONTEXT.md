@@ -1923,3 +1923,14 @@ c3 `86e84e4`; main `6537739`。均已 push。
   (512KB+12KB << 25%x140MB ws) → 印证 MIMO 收益在大分量内部单内核 codegen 复用, 非跨分量。
 - 回归: mf 3 / fwd 2 / fp 12 / graph 115 / merger 13 全绿。c3.fingerprint 不入库(.gitignore)。
 - c3 6896259; main 11a17d1。均已 push。
+
+## 4.70 2026-09-07 指纹运行时接入 doCompile, fromMachineDefaults 全编译路径可用(c3 db0b62f)
+
+- C3Engine::doCompile(同步/异步所有 kernel 编译必经路径)开头 loadDefault(): 进程内一次
+  (成败都缓存), MachineFingerprint getter 之后 O(1)。缺失文件不抛异常, 保保守默认。
+- 使 fromMachineDefaults() 在真实编译路径可拿到 deploy 校准 launch 税; BW-RECONCILE 已是
+  影子消费点并读机器值。为 planner 代价门接入运行时决策(backward 接管 G2/G3)铺好数据源。
+- 注意(诚实): planner 代价门**决策消费**仍需 planner 运行时接管那一步(受 G0-G3 决策门约束,
+  非数据源问题)。当前把运行时数据源接好 + reconcile 影子消费, 是真接管的最后一块数据前置。
+- 回归: mf 3 / mnist_step(多次编译, loadDefault 幂等) / fp 12 全绿。
+- c3 db0b62f; main 98bf957。均已 push。
