@@ -278,3 +278,59 @@ TEST(FusionPlanner, RegionKernelDisjointTwoRegions) {
     EXPECT_EQ(up->node_ids.size(), 2u);   // {p, e1}
     EXPECT_EQ(ur->node_ids.size(), 2u);   // {r, e2}
 }
+
+// ======================= RegionKernel 跨分量合并代价门 =======================
+// 两个分量只经共享外部输入间接相连: 重读节省大 → 并单 region; 否则保持多 region。
+
+struct SharedExternalGraph {
+    Graph g;
+    size_t p; // 链1: Neg(x)
+    size_t e1;
+    size_t r; // 链2: Exp(x)
+};
+
+static SharedExternalGraph buildTwoChainsSharedExternal() {
+    SharedExternalGraph out;
+    auto d = TensorDesc::fromShape({1000});
+    size_t x = out.g.addInput(d);
+    // 链1: x -> Neg -> ReLU
+    out.p = out.g.addNode(NegNode{d}, {x}, d);
+    out.e1 = out.g.addNode(ReLUNode{d}, {out.p}, d);
+    // 链2: x -> Exp (与链1 无共享 compute, 仅共享外部输入 x)
+    out.r = out.g.addNode(ExpNode{d}, {x}, d);
+    out.g.markOutput(out.e1);
+    out.g.markOutput(out.r);
+    return out;
+}
+
+TEST(FusionPlanner, RegionKernelCostMergeWorthy) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal();
+    RegionFusionPolicy policy;
+    policy.min_benefit_ratio = 0.1; // 收益(1000B 重读省) > 10% 工作集(3000B) → 并
+    FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_EQ(region.compute_unit_count, 1u);
+    EXPECT_TRUE(region.region_metric.merged);
+    EXPECT_EQ(region.region_metric.component_count, 2u);
+    EXPECT_EQ(region.region_metric.saved_reload_bytes, 1000ull);
+    EXPECT_EQ(region.region_metric.working_set_bytes, 3000ull);
+    const FusionUnit* u = region.unitOf(sg.p);
+    ASSERT_NE(u, nullptr);
+    EXPECT_EQ(u->kind, FusionUnitKind::REGION_KERNEL);
+    EXPECT_EQ(u->node_ids.size(), 3u); // {p, e1, r}
+}
+
+TEST(FusionPlanner, RegionKernelCostKeepsSeparate) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal();
+    RegionFusionPolicy policy;
+    policy.min_benefit_ratio = 1.0; // 收益(1000B) 不敌 100% 工作集(3000B) → 不并
+    FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_EQ(region.compute_unit_count, 2u);
+    EXPECT_FALSE(region.region_metric.merged);
+    const FusionUnit* up = region.unitOf(sg.p);
+    const FusionUnit* ur = region.unitOf(sg.r);
+    ASSERT_NE(up, nullptr);
+    ASSERT_NE(ur, nullptr);
+    EXPECT_NE(up, ur);
+    EXPECT_EQ(up->node_ids.size(), 2u); // {p, e1}
+    EXPECT_EQ(ur->node_ids.size(), 1u); // {r}
+}

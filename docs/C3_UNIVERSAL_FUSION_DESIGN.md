@@ -203,3 +203,10 @@ region 拆为 n=21 + n=2 两个连通分量。
 节点图无内边把它们联通。故要把跨分量再并成一个内核, 需额外判据「同一次 backward 调用共享外部
 输入(尤其 grad 与同组 activation)」+ **代价门**决定, 而非纯节点连通定律。该判据设计留给下一步,
 **不强凑 1 region**(否则即针对 MIMO 特判, 违背泛化)。
+
+### 代价门雏形 + 真实 FFN 决策证据 (STATUS 4.64)
+RegionKernel 增跨分量合并代价门: 度量 = 共享外部输入重读节省(reload) vs 工作集(ws)代理;
+`merged = reload > min_benefit_ratio * ws`(默认 0.25, 系数终态由 autotune 指纹给出; launch 省税
+不在原型中计入)。真实 FFN 实测: `comp=2 reload=524288 ws=290947072 merged=0` → 保守默认**保持
+2 regions**。结论: MIMO 单内核的收益主体是 **launch 省税 + 内核内向量化**, 不是重读节省——
+把 launch 项补进代价门(带机器指纹)是让 planner 泛化复现 MIMO 决策的最后一块, 而非再加结构特判。
