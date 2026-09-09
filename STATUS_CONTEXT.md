@@ -1821,3 +1821,25 @@ fused_graph 拓扑非按名), (2) 验证后再经决策门考虑接管 compileFF
 
 ### 回归
 c3 `1c90111`; main `08e1b35`。FFN bench(带 diag) MIMO 命中正常; 其余全绿沿用 §4.61。
+
+## 4.63 2026-09-07 FusionPlanner 增 RegionKernel 判据(L2-判据, c3 9feb199)
+
+在通用图融合 backward 方向(L2)落地判据层第一步——多输出 region 判据(仍不改运行时)。
+
+- `planUnits(Graph, FusionStrategy::RegionKernel)`: 连通 regionable 分量(逐元素/MatMul/Transpose)
+  并成 REGION_KERNEL 单元; 共享中间量内联、Transpose 折叠、允许多 GEMM(单内核多输出)。
+  SumReduce/Softmax/CrossEntropy/Fused/Const 为硬边界(各自独立 kernel)。
+  纯节点连通判据, 数据驱动非按名。
+- 默认 Default 策略路径不变; test_fusion_planner 5→8 测全绿(新增: 共享中间量→1 region /
+  transpose 并入 / 不相连→多 region)。
+
+### 真实 FFN 实测(诊断 C3_PLANNER_DIAG)
+FFN-MIMO fused_graph: default_units=9, **region_units=2**(n=21 + n=2)。
+结论: 纯 C3 节点连通判据给出 2 个 region, 而非 MIMO 的单内核——FFN 两部分计算在节点图里
+只经共享外部输入(grad/activation buffer)间接相连, 无节点内边。
+故「跨分量再并成一个内核」需额外判据(同一次 backward 共享外部输入) + 代价门, 属下一步设计;
+**不强凑 1 region**(否则即针对 MIMO 特判, 违背泛化)。
+
+### 提交
+c3 `9feb199`(RegionKernel 判据 + 诊断 region 打印); main `3eecd24`(bump + 单测 + 设计文档 §9)。
+回归: test_fusion_planner 8 / test_c3_graph 115 / test_graph_merger 13 全绿。
