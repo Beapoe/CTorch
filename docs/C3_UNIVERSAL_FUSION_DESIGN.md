@@ -227,3 +227,13 @@ working_set 由「求和」精化为「峰值 live」(任意时刻同时存活�
 因 grad_g/grad_u 等大中间量本就同时存活。**结论坐实**: BS=128 下单内核的收益不在中间量复用
 (中间量巨大且同时 live), 而在 launch 省税; 字节代价模型(launch=400KB)低估了真实 launch 税,
 这正是 autotune 机器指纹该实测的量。判据层至此完整且保守, 不再手调代理。
+
+### forward 整图捕获层已落地(STATUS 4.67) —— 前置缺口补齐
+`ForwardCapture::capture(rootTensor)` 从根输出沿 autograd 上游遍历, 翻译成 c3::Graph:
+纯只读快照, 不碰 dispatch / in_autograd。语义: requires_grad 叶(GradAccumulator)=去重外部叶,
+非 grad 常量=每次新叶, 计算中间量递归。支持 MatMul/Add/Sub/Mul/Div/Neg/ReLU/Sigmoid/Tanh/
+Exp/Log/Softmax/CrossEntropy, 不支持类型明确报错。
+集成测试: 真实 eager 前向 MatMul->ReLU 捕获成 4 节点/2 叶 Graph, planner 自动判 GEMM_EPILOGUE。
+**意义**: 通用图融合现在有了 forward 真实整图输入——planner 可从根输出看到完整前向结构,
+补上「forward 无整图捕获」这一架构前置。下一步即可让 planner 在这类 forward Graph 上做
+region 判定, 与 backward/MIMO 同口径。
