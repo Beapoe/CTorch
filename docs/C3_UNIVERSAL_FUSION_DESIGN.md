@@ -189,3 +189,17 @@ planner 需增一种单元策略 `REGION_KERNEL`: 对**连通** backward 区段(
 - 与现 MIMO 运行时的关系: 该策略是 MIMO 目录的**通用替代**; 因触碰训练正确性核心,
   落地需分两步: (1) 先在 planner 加 `REGION_KERNEL` 判据 + 单测(用真实 fused_graph 拓扑,
   非按名特判, 复现"连通→1 单元"), (2) 验证后经决策门再考虑接管 `compileFFNMIMOBackwardAsync`。
+
+### RegionKernel 判据已落地 + 真实 FFN 实测 (c3 HEAD, STATUS 4.63)
+`FusionPlanner::planUnits(Graph, FusionStrategy::RegionKernel)` 新增单内核多输出 region 判据:
+对**连通 regionable 分量**(逐元素/MatMul/Transpose, 排除 SumReduce/Softmax/CrossEntropy/Fused/Const 硬边界)
+并成 `REGION_KERNEL` 单元; 共享中间量内联、Transpose 折叠、允许多 GEMM(单内核顺序执行+多输出)。
+配套 3 单测(共享中间量→1 region / transpose 并入 / 不相连→多 region), 默认策略 5 测仍绿。
+
+**真实 FFN fused_graph 实测(诊断 C3_PLANNER_DIAG)**: `nodes=34 default_units=9 region_units=2`,
+region 拆为 n=21 + n=2 两个连通分量。
+**关键发现**: 纯 C3 **节点连通**判据在真实 FFN 上给出 2 个 region(而非 MIMO 的单内核)。
+原因: FFN 两部分计算在节点图里只通过**共享外部输入**(grad/各 activation buffer)间接相连——
+节点图无内边把它们联通。故要把跨分量再并成一个内核, 需额外判据「同一次 backward 调用共享外部
+输入(尤其 grad 与同组 activation)」+ **代价门**决定, 而非纯节点连通定律。该判据设计留给下一步,
+**不强凑 1 region**(否则即针对 MIMO 特判, 违背泛化)。

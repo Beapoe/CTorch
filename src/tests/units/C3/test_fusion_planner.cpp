@@ -185,3 +185,96 @@ TEST(FusionPlanner, SharedGemmNotMerged) {
     for (size_t e : umm1->external_input_ids) if (e == mm2) has_mm2_ext = true;
     EXPECT_TRUE(has_mm2_ext);
 }
+
+// ======================= RegionKernel: 共享中间量 → 单 region =======================
+// 复现 MIMO 语义: 一个中间量被多个 GEMM 消费(多输出), region 策略应并成单内核,
+// 而默认(多消费者必物化/双 GEMM 不并)会切成多个单元。
+
+TEST(FusionPlanner, RegionKernelSharedGemmSingleRegion) {
+    Graph g;
+    auto xd = TensorDesc::fromShape({2, 3});
+    auto wd = TensorDesc::fromShape({3, 4});
+    auto md = TensorDesc::fromShape({2, 4});
+    size_t x = g.addInput(xd);
+    size_t w1 = g.addInput(wd);
+    size_t w2 = g.addInput(wd);
+    size_t mid = g.addNode(ReLUNode{xd}, {x}, xd);       // 共享中间量, 被两个 GEMM 消费
+    size_t outA = g.addNode(MatMulNode{xd, wd}, {mid, w1}, md);
+    size_t outB = g.addNode(MatMulNode{xd, wd}, {mid, w2}, md);
+    g.markOutput(outA);
+    g.markOutput(outB);
+
+    FusionPlan def = FusionPlanner::planUnits(g);                       // Default
+    FusionPlan region = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel);
+
+    // 默认: 多消费者 → mid 独立物化 + 两个 GEMM 各自单元
+    EXPECT_EQ(def.compute_unit_count, 3u);
+
+    // region: 连通区段(mid+两个 GEMM)并成 1 个多输出内核
+    EXPECT_EQ(region.compute_unit_count, 1u);
+    const FusionUnit* umid = region.unitOf(mid);
+    ASSERT_NE(umid, nullptr);
+    EXPECT_EQ(umid->kind, FusionUnitKind::REGION_KERNEL);
+    // mid 与其两个 GEMM 消费者在同一 region(共享中间量内联)
+    EXPECT_EQ(region.unitOf(outA), umid);
+    EXPECT_EQ(region.unitOf(outB), umid);
+    EXPECT_EQ(umid->node_ids.size(), 3u); // {mid, outA, outB}
+}
+
+// ======================= RegionKernel: Transpose 并入 GEMM =======================
+
+TEST(FusionPlanner, RegionKernelIncludesTranspose) {
+    Graph g;
+    auto xd = TensorDesc::fromShape({2, 3});
+    auto wd = TensorDesc::fromShape({3, 4});
+    auto md = TensorDesc::fromShape({2, 4});
+    auto mtd = TensorDesc::fromShape({4, 2});
+    size_t x = g.addInput(xd);
+    size_t w = g.addInput(wd);
+    size_t mm = g.addNode(MatMulNode{xd, wd}, {x, w}, md);
+    size_t mmT = g.addNode(TransposeNode{md, 0, 1}, {mm}, mtd);   // 转置
+    size_t relu = g.addNode(ReLUNode{mtd}, {mmT}, mtd);
+    g.markOutput(relu);
+
+    FusionPlan region = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel);
+    // 默认: mm(GEMM) 与 relu(ELEM) 被 mmT(默认 LEAF 边界)隔开
+    FusionPlan def = FusionPlanner::planUnits(g);
+    EXPECT_EQ(def.compute_unit_count, 2u); // mm, relu(各自, 中间夹 transpose 不并入)
+
+    // region: transpose 折叠进 GEMM, mm/mmT/relu 连通 → 1 region
+    EXPECT_EQ(region.compute_unit_count, 1u);
+    const FusionUnit* ummT = region.unitOf(mmT);
+    ASSERT_NE(ummT, nullptr);
+    EXPECT_EQ(ummT->kind, FusionUnitKind::REGION_KERNEL);
+    EXPECT_EQ(region.unitOf(mm), ummT);
+    EXPECT_EQ(region.unitOf(relu), ummT);
+}
+
+// ======================= RegionKernel: 不相连 → 多个 region(非整图瞎并) =======================
+
+TEST(FusionPlanner, RegionKernelDisjointTwoRegions) {
+    Graph g;
+    auto d = TensorDesc::fromShape({2, 3});
+    size_t x = g.addInput(d);
+    size_t y = g.addInput(d);
+    // 链1: x -> Neg -> ReLU
+    size_t p = g.addNode(NegNode{d}, {x}, d);
+    size_t e1 = g.addNode(ReLUNode{d}, {p}, d);
+    // 链2: y -> Neg -> Tanh (与链1 无共享 compute)
+    size_t r = g.addNode(NegNode{d}, {y}, d);
+    size_t e2 = g.addNode(TanhNode{d}, {r}, d);
+    g.markOutput(e1);
+    g.markOutput(e2);
+
+    FusionPlan region = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel);
+    // 两个不相连连通分量 → 2 个 region, 不把整图并成 1 个
+    EXPECT_EQ(region.compute_unit_count, 2u);
+    const FusionUnit* up = region.unitOf(p);
+    const FusionUnit* ur = region.unitOf(r);
+    ASSERT_NE(up, nullptr);
+    ASSERT_NE(ur, nullptr);
+    EXPECT_EQ(up->kind, FusionUnitKind::REGION_KERNEL);
+    EXPECT_NE(up, ur);
+    EXPECT_EQ(up->node_ids.size(), 2u);   // {p, e1}
+    EXPECT_EQ(ur->node_ids.size(), 2u);   // {r, e2}
+}
