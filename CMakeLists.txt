@@ -173,6 +173,7 @@ set(CT-C3-Core
         c3/src/C3/RollingHash.cpp
         c3/src/C3/RegionFusionRegistry.cpp
         c3/src/C3/FusionPlanner.cpp
+        c3/src/C3/ForwardCapture.cpp
 )
 
 # [Fix] v0.5.2 Linux build: Metal/MPS .mm 文件 macOS 专属, 下面 if APPLE 块条件添加
