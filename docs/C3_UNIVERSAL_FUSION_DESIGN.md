@@ -210,3 +210,13 @@ RegionKernel 增跨分量合并代价门: 度量 = 共享外部输入重读节�
 不在原型中计入)。真实 FFN 实测: `comp=2 reload=524288 ws=290947072 merged=0` → 保守默认**保持
 2 regions**。结论: MIMO 单内核的收益主体是 **launch 省税 + 内核内向量化**, 不是重读节省——
 把 launch 项补进代价门(带机器指纹)是让 planner 泛化复现 MIMO 决策的最后一块, 而非再加结构特判。
+
+### launch 项接入 + live 工作集修正 (STATUS 4.65)
+代价门补全: `merged = has_shared_ext && (reload + launch) > ratio * ws`。
+- launch 项 `saved_launch = (k-1)*launch_unit_bytes`, 仅在共享外部输入的分量间计入(同一 backward 调用分支);
+  纯不相连分支不并(保连通性结论)。`launch_unit_bytes` 默认 400KB(约 2µs@200GB/s), 终态由 autotune 校准。
+- working_set 修正为 live 中间量(graph 输出除外)。真实 FFN: `reload=512KB launch=400KB ws=142MB merged=0`。
+  结论: 大 batch FFN 的中间 activation(如 128×11008 的 grad_g/u)在 GEMM 间本就要落地、融合也塞不进
+  缓存, 故纯字节代价下保守不并——与 M3「大 batch GEMM 合并负收益」一致。
+- **剩余代理误差**: ws 现为「所有中间量求和」而非「峰值 live」, 会高估; 下一步用峰值 live 精化,
+  或直接交给 autotune 在目标机实测 launch 税与最优系数, 而非继续手调代理。

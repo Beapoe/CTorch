@@ -289,9 +289,9 @@ struct SharedExternalGraph {
     size_t r; // 链2: Exp(x)
 };
 
-static SharedExternalGraph buildTwoChainsSharedExternal() {
+static SharedExternalGraph buildTwoChainsSharedExternal(size_t numel = 1000) {
     SharedExternalGraph out;
-    auto d = TensorDesc::fromShape({1000});
+    auto d = TensorDesc::fromShape({numel});
     size_t x = out.g.addInput(d);
     // 链1: x -> Neg -> ReLU
     out.p = out.g.addNode(NegNode{d}, {x}, d);
@@ -304,15 +304,18 @@ static SharedExternalGraph buildTwoChainsSharedExternal() {
 }
 
 TEST(FusionPlanner, RegionKernelCostMergeWorthy) {
-    SharedExternalGraph sg = buildTwoChainsSharedExternal();
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
     RegionFusionPolicy policy;
-    policy.min_benefit_ratio = 0.1; // 收益(1000B 重读省) > 10% 工作集(3000B) → 并
+    policy.min_benefit_ratio = 0.1;   // 重读省 1000B > 10% live 工作集 1000B → 并
+    policy.launch_unit_bytes = 0;     // 关 launch, 只看重读项
     FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
     EXPECT_EQ(region.compute_unit_count, 1u);
     EXPECT_TRUE(region.region_metric.merged);
     EXPECT_EQ(region.region_metric.component_count, 2u);
     EXPECT_EQ(region.region_metric.saved_reload_bytes, 1000ull);
-    EXPECT_EQ(region.region_metric.working_set_bytes, 3000ull);
+    EXPECT_EQ(region.region_metric.saved_launch_bytes, 0ull);
+    // live 中间量: 仅 p(Neg), e1/r 是 graph output 不计入
+    EXPECT_EQ(region.region_metric.working_set_bytes, 1000ull);
     const FusionUnit* u = region.unitOf(sg.p);
     ASSERT_NE(u, nullptr);
     EXPECT_EQ(u->kind, FusionUnitKind::REGION_KERNEL);
@@ -320,9 +323,10 @@ TEST(FusionPlanner, RegionKernelCostMergeWorthy) {
 }
 
 TEST(FusionPlanner, RegionKernelCostKeepsSeparate) {
-    SharedExternalGraph sg = buildTwoChainsSharedExternal();
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
     RegionFusionPolicy policy;
-    policy.min_benefit_ratio = 1.0; // 收益(1000B) 不敌 100% 工作集(3000B) → 不并
+    policy.min_benefit_ratio = 1.0;   // 重读省 1000B 不敌 100% 工作集 1000B → 不并
+    policy.launch_unit_bytes = 0;
     FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
     EXPECT_EQ(region.compute_unit_count, 2u);
     EXPECT_FALSE(region.region_metric.merged);
@@ -333,4 +337,18 @@ TEST(FusionPlanner, RegionKernelCostKeepsSeparate) {
     EXPECT_NE(up, ur);
     EXPECT_EQ(up->node_ids.size(), 2u); // {p, e1}
     EXPECT_EQ(ur->node_ids.size(), 1u); // {r}
+}
+
+// launch 项独立生效: 共享外部输入但重读节省小, 靠省 launch 跨分量合并
+TEST(FusionPlanner, RegionKernelLaunchMerges) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(6);
+    RegionFusionPolicy policy;
+    policy.min_benefit_ratio = 1.0;    // 单看重读: 6B 不敌 100% live(6B) → 不会并
+    policy.launch_unit_bytes = 100;    // 但省 1 次 launch(100B) 补足 → 并
+    FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_EQ(region.compute_unit_count, 1u);
+    EXPECT_TRUE(region.region_metric.merged);
+    EXPECT_EQ(region.region_metric.saved_reload_bytes, 6ull);
+    EXPECT_EQ(region.region_metric.saved_launch_bytes, 100ull); // (k-1)*launch = 1*100
+    EXPECT_EQ(region.region_metric.working_set_bytes, 6ull);
 }
