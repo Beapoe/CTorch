@@ -352,3 +352,25 @@ TEST(FusionPlanner, RegionKernelLaunchMerges) {
     EXPECT_EQ(region.region_metric.saved_launch_bytes, 100ull); // (k-1)*launch = 1*100
     EXPECT_EQ(region.region_metric.working_set_bytes, 6ull);
 }
+
+// 峰值 live 工作集: 两个不重叠的中间量(求和=12)峰值只有 6。
+// 证明 working_set 用峰值而非求和, 避免高估寄存器/缓冲压力。
+TEST(FusionPlanner, RegionKernelPeakLiveWorkingSet) {
+    Graph g;
+    auto d = TensorDesc::fromShape({6});
+    size_t x = g.addInput(d);
+    // 链A: x -> Neg(n1) -> ReLU(out1);  n1 live 于 [n1, out1]
+    size_t n1 = g.addNode(NegNode{d}, {x}, d);
+    size_t out1 = g.addNode(ReLUNode{d}, {n1}, d);
+    // 链B: x -> Exp(n2) -> Tanh(out2);  n2 live 于 [n2, out2] (与 n1 不重叠)
+    size_t n2 = g.addNode(ExpNode{d}, {x}, d);
+    size_t out2 = g.addNode(TanhNode{d}, {n2}, d);
+    g.markOutput(out1);
+    g.markOutput(out2);
+
+    RegionFusionPolicy policy;
+    policy.min_benefit_ratio = 100.0; // 任意, 只要不合并也能读 metric
+    FusionPlan region = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, policy);
+    // n1 与 n2 生命周期不重叠 → 峰值 6, 而非求和 12
+    EXPECT_EQ(region.region_metric.working_set_bytes, 6ull);
+}

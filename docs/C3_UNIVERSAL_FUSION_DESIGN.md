@@ -220,3 +220,10 @@ RegionKernel 增跨分量合并代价门: 度量 = 共享外部输入重读节�
   缓存, 故纯字节代价下保守不并——与 M3「大 batch GEMM 合并负收益」一致。
 - **剩余代理误差**: ws 现为「所有中间量求和」而非「峰值 live」, 会高估; 下一步用峰值 live 精化,
   或直接交给 autotune 在目标机实测 launch 税与最优系数, 而非继续手调代理。
+
+### ws 峰值 live 精化 (STATUS 4.66)
+working_set 由「求和」精化为「峰值 live」(任意时刻同时存活中间量的最大 numel, graph 输出除外,
+拓扑序用节点 id, 中间量 live 于 [m, last_use(m)])。真实 FFN: ws 142MB → 134MB(几乎不降),
+因 grad_g/grad_u 等大中间量本就同时存活。**结论坐实**: BS=128 下单内核的收益不在中间量复用
+(中间量巨大且同时 live), 而在 launch 省税; 字节代价模型(launch=400KB)低估了真实 launch 税,
+这正是 autotune 机器指纹该实测的量。判据层至此完整且保守, 不再手调代理。
