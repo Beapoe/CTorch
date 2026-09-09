@@ -43,3 +43,6 @@ paper/
 # Python cache
 __pycache__/
 *.pyc
+
+# deploy-time machine fingerprint (machine-specific, not committed)
+c3.fingerprint

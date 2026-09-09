@@ -174,6 +174,7 @@ set(CT-C3-Core
         c3/src/C3/RegionFusionRegistry.cpp
         c3/src/C3/FusionPlanner.cpp
         c3/src/C3/ForwardCapture.cpp
+        c3/src/C3/MachineFingerprint.cpp
 )
 
 # [Fix] v0.5.2 Linux build: Metal/MPS .mm 文件 macOS 专属, 下面 if APPLE 块条件添加
@@ -679,6 +680,13 @@ add_executable(bench_llama_ffn_train src/tests/standalone/bench_llama_ffn_train.
 target_link_libraries(bench_llama_ffn_train PRIVATE CTorch)
 target_include_directories(bench_llama_ffn_train PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
 target_link_options(bench_llama_ffn_train PRIVATE -rdynamic)
+
+# c3ctl: C3 部署校准 CLI(deploy-time 机器指纹: c3ctl calibrate / show)
+add_executable(c3ctl tools/c3ctl.cpp)
+target_link_libraries(c3ctl PRIVATE CTorch)
+target_include_directories(c3ctl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_options(c3ctl PRIVATE -rdynamic)
+
 
 add_executable(test_relu_backward src/tests/standalone/test_relu_backward.cpp)
 target_link_libraries(test_relu_backward PRIVATE CTorch)
