@@ -1893,3 +1893,17 @@ c3 `86e84e4`; main `6537739`。均已 push。
 - 意义: planner 现在有 forward 真实整图输入, 可对完整前向做 region 判定。
 - 回归: fp 12 / graph 115 / merger 13 / fwd_capture 2 全绿。
 - c3 3a7b4ef; main e83ddf7 + 9930aa4(文档)。均已 push。
+
+## 4.68 2026-09-07 Backward 融合迁移决策门设计(G0-G3) + BW-RECONCILE(c3 efe84c2)
+
+3 号(backward 运行时替换方案)按约定先出设计与 off-path 校验, 不动运行时。
+
+- 拆解: backward 融合 = A(触发点 backward 子图, 已通用) + B(吞多少上游, MIMO 手写, **不通用**)
+  + C(是否值得单内核, planner+代价门已就绪) + D(codegen/执行/回填, 已通用)。
+  关键认知: 最难是 B(上游扩展范围), planner 看到的 fused_graph 已扩展好, 只决定并几个内核。
+- 决策门 G0(现状)→G1(一致性对拍, off-path)→G2(影子, 不一致仅告警)→G3(接管)。
+  放行: G1 一致率100%可解释; G3 覆盖结构全 reconciled + max_diff=0。
+- BW-RECONCILE 诊断: FFN mimo_kernels=1 planner_wants=2 reconciled=0 → 差异可解释
+  (launch 税低估/ws 高估)。**launch 税 autotune 校准是 G1→G3 前置**, 否则一致率恒不达标。
+- 文档 docs/C3_BACKWARD_FUSION_MIGRATION_DESIGN.md; 纯只读, 不改运行时。
+- c3 efe84c2; main 358a4d5。均已 push。
