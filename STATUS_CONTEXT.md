@@ -1858,3 +1858,13 @@ L2 判据继续推进(仍 off-path, 不改运行时)。
 
 ### 提交
 c3 `86e84e4`; main `6537739`。均已 push。
+
+## 4.65 2026-09-07 RegionKernel 代价门补 launch 项 + live 工作集修正(c3 43ae8f0)
+
+- launch 项: RegionFusionPolicy.launch_unit_bytes(默认 400KB=约2µs@200GB/s, autotune 校准);
+  saved_launch=(k-1)*launch, 仅在共享外部输入的分量间计入, 纯不相连不并(保连通结论)。
+- working_set 修正为 live 中间量(graph 输出除外)。merged = has_shared_ext && (reload+launch) > ratio*ws。
+- 真实 FFN: reload=512KB launch=400KB ws=142MB merged=0 → 大 batch 中间 activation 需落地,
+  保守不并, 与 M3 大 batch GEMM 合并负收益一致。剩余代理误差: ws 是求和非峰值 live, 下一步精化或交 autotune。
+- 单测 10→11(launch 项独立生效), 全绿; graph 115 / merger 13 无回退。
+- c3 43ae8f0; main 8c7c8fb。均已 push。
