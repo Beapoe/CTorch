@@ -1868,3 +1868,13 @@ c3 `86e84e4`; main `6537739`。均已 push。
   保守不并, 与 M3 大 batch GEMM 合并负收益一致。剩余代理误差: ws 是求和非峰值 live, 下一步精化或交 autotune。
 - 单测 10→11(launch 项独立生效), 全绿; graph 115 / merger 13 无回退。
 - c3 43ae8f0; main 8c7c8fb。均已 push。
+
+## 4.66 2026-09-07 RegionKernel working_set 精化为峰值 live(c3 a7350c1)
+
+- working_set 由"中间量求和"改为"峰值 live"(任意时刻同时存活中间量的最大 numel,
+  graph 输出除外, 拓扑序用节点 id, 中间量 live 于 [m, last_use(m)])。
+- 真实 FFN: ws 142MB → 134MB(几乎不降), 因 grad_g/grad_u 等大中间量本就同时存活。
+  坐实: BS=128 下单内核收益在 launch 省税而非中间量复用; 字节代价模型低估真实 launch 税,
+  这正是 autotune 机器指纹该实测的量。判据层至此完整且保守。
+- 单测 11→12(峰值 live < 求和验证), 全绿; graph 115 无回退。
+- c3 a7350c1; main a5566e4。均已 push。
