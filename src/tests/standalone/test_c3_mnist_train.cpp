@@ -44,6 +44,8 @@ static void tempCrashHandler(int sig) {
 #include "C3/C3BackwardCapture.h"  // DEBT-NEW-7 v0.5.1+ 调试用,看 backward fusion hit
 #include "C3/C3Engine.h"            // [MIMO 深挖] getMultiNodeExecTiming
 #include "C3/JITCache.h"             // [Dev] v0.5.2 (4) JITCache 1.0 stats 输出
+#include "C3/ForwardCapture.h"       // [HOOK] forward 整图捕获(旁路采集)
+#include "C3/FusionPlanner.h"        // [HOOK] 泛化融合判据
 #endif
 #include "mnist/mnist_loader.h"
 #include "ctQALS/Random.h"
@@ -297,6 +299,30 @@ static float trainEpoch(
         total_loss += loss_val;
         auto t_loss_end = std::chrono::high_resolution_clock::now();
         loss_time_acc += std::chrono::duration<double, std::milli>(t_loss_end - t_loss_start).count();
+
+        // [HOOK 旁路采集] C3_HOOK_CAPTURE=1: 在真实训练第 1 个 batch 的 forward 整图捕获 + planner
+        // (默认关, 不改训练行为/结果; 作进 G2 的一致率决策数据)
+        {
+            static const bool hook = [] { const char* e = std::getenv("C3_HOOK_CAPTURE"); return e && *e == '1'; }();
+            static bool hooked = false;
+            if (hook && !hooked) {
+                hooked = true;
+                auto cap = ct::c3::ForwardCapture::capture(loss);
+                if (!cap.ok) {
+                    fprintf(stderr, "[HOOK] MNIST capture_FAIL: %s\n", cap.error.c_str());
+                } else {
+                    auto plan = ct::c3::FusionPlanner::planUnits(cap.graph);
+                    fprintf(stderr, "[HOOK] MNIST fwd graph nodes=%zu inputs=%zu compute_units=%zu\n",
+                            cap.graph.nodeCount(), cap.graph.inputCount(), plan.compute_unit_count);
+                    for (const auto& u : plan.units) {
+                        if (!u.isCompute()) continue;
+                        fprintf(stderr, "[HOOK]   unit kind=%d n=%zu\n", (int)u.kind, u.node_ids.size());
+                    }
+                    // forward 侧一致率样本: 现状 forward 融合对 FC 判 MatMul+激活单内核
+                    // planner 在真实 MNIST 整图上的分区即"若接管会怎么并"的旁路参照
+                }
+            }
+        }
 
         // 反向传播
         auto t_bwd_start = std::chrono::high_resolution_clock::now();

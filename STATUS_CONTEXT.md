@@ -1934,3 +1934,14 @@ c3 `86e84e4`; main `6537739`。均已 push。
   非数据源问题)。当前把运行时数据源接好 + reconcile 影子消费, 是真接管的最后一块数据前置。
 - 回归: mf 3 / mnist_step(多次编译, loadDefault 幂等) / fp 12 全绿。
 - c3 db0b62f; main 98bf957。均已 push。
+
+## 4.71 2026-09-09 真实 MNIST 训练 hook 采集: forward planner 与现状逐层一致(3/3)
+
+在 test_c3_mnist_train.cpp 训练循环(loss 算完后、backward 前)加 env 门控旁路 hook
+(C3_HOOK_CAPTURE=1, 默认关, 不改训练行为): ForwardCapture 抓真实 forward 整图 → FusionPlanner。
+
+实测(MNIST 第 1 batch):
+- graph nodes=17 inputs=8 compute_units=3
+- 3 个 GEMM_EPILOGUE 单元(n=3, n=3, n=2) == 3 层 FC(MatMul+Add+ReLU x2 + MatMul+Add)各自单内核。
+- **forward 侧一致率 3/3**: planner 划分与现状 checkPattern 逐层单内核一致(首个真实训练证据)。
+- 配 backward FFN BW-RECONCILE(不一致但已解释), 构成进 G2 的真实决策数据。
