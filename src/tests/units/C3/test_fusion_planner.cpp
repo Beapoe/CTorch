@@ -12,6 +12,7 @@
 
 #include <gtest/gtest.h>
 
+#include <algorithm>
 #include <vector>
 
 #include "C3/FusionPlanner.h"
@@ -529,4 +530,77 @@ TEST(FusionPlanner, RegionKernelPeakLiveWorkingSet) {
     FusionPlan region = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, policy);
     // n1 与 n2 生命周期不重叠 → 峰值 6, 而非求和 12
     EXPECT_EQ(region.region_metric.working_set_bytes, 6ull);
+}
+
+// ======================= 图切分 (G3 集成点基础) =======================
+// partitionGraph: 按 FusionPlan 的 compute units 切出可独立编译的子图。
+// 语义保证: 覆盖全部 compute 节点(无重无漏) + 子图拓扑有效 + 输入输出映射可回填。
+
+TEST(FusionPlanner, PartitionCoversAllComputeNodesNoDupNoLoss) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    FusionPlan plan = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel);
+    std::vector<PartitionedSubGraph> subs = partitionGraph(sg.g, plan);
+
+    // 子图数 == compute unit 数
+    ASSERT_EQ(subs.size(), plan.compute_unit_count);
+
+    // 覆盖性: 拼接全部子图节点 == 全部 compute 节点, 且无重复
+    std::vector<size_t> all;
+    for (const auto& s : subs)
+        all.insert(all.end(), s.unit_node_ids.begin(), s.unit_node_ids.end());
+    std::sort(all.begin(), all.end());
+
+    size_t expected = 0;
+    for (const auto& u : plan.units)
+        if (u.isCompute()) expected += u.node_ids.size();
+
+    EXPECT_EQ(all.size(), expected);                       // 无漏
+    EXPECT_EQ(std::unique(all.begin(), all.end()), all.end());  // 无重
+}
+
+TEST(FusionPlanner, PartitionSubGraphsAreValidWithBoundaryMapping) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    // 显式构造"不跨分量合并"的场景(默认 policy 的 launch 项会使其合并成 1 个 unit)
+    RegionFusionPolicy strict;
+    strict.min_benefit_ratio = 1.0;
+    strict.launch_unit_bytes = 0;
+    FusionPlan plan = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, strict);
+
+    std::vector<PartitionedSubGraph> subs = partitionGraph(sg.g, plan);
+    ASSERT_EQ(subs.size(), 2u);   // 两个未合并的分量 → 2 个子图
+    for (const auto& s : subs) {
+        EXPECT_TRUE(s.graph.isValid());          // 拓扑有效 → 可独立编译
+        EXPECT_GT(s.graph.outputCount(), 0u);    // 有输出
+        EXPECT_EQ(s.graph.inputCount(), s.input_orig_ids.size());
+        EXPECT_EQ(s.graph.outputCount(), s.output_orig_ids.size());
+        // 映射表能覆盖本子图全部节点
+        EXPECT_EQ(s.orig_to_sub.size(), s.unit_node_ids.size());
+    }
+}
+
+// 两个分量仅共享外部输入、无中间量依赖 → 子图之间无 upstream 依赖
+TEST(FusionPlanner, PartitionSharedExternalInputHasNoUpstreamDep) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    RegionFusionPolicy strict;
+    strict.min_benefit_ratio = 1.0;
+    strict.launch_unit_bytes = 0;
+    FusionPlan plan = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, strict);
+
+    std::vector<PartitionedSubGraph> subs = partitionGraph(sg.g, plan);
+    ASSERT_EQ(subs.size(), 2u);
+    for (const auto& s : subs) EXPECT_TRUE(s.upstream_units.empty());
+}
+
+// 合并成单 region 时只切出 1 个子图(与 MIMO 单内核一致)
+TEST(FusionPlanner, PartitionMergedPlanYieldsSingleSubGraph) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    RegionFusionPolicy policy;
+    policy.merge_strategy = RegionMergeStrategy::Allow;   // ADR-0002 方案 C: 默认合并
+    policy.max_region_nodes = 64;
+    FusionPlan plan = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    ASSERT_TRUE(plan.region_metric.merged);
+
+    std::vector<PartitionedSubGraph> subs = partitionGraph(sg.g, plan);
+    EXPECT_EQ(subs.size(), 1u);
+    EXPECT_EQ(subs[0].unit_node_ids.size(), 3u);   // {p, e1, r}
 }
