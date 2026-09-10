@@ -45,6 +45,7 @@
 - §4.80 G3 集成点基础 partitionGraph + **EXP-2 实测推翻方案 C**(不合并快 3.5-4%)(STATUS 新)
 - §4.81 G3 数值正确性验证: 切分执行与整图内核**逐位一致**(max_abs_diff=0, 9/9); 修复测量工具"Const 被当普通输入填假数据"缺陷; 识别分隔符覆盖缺口(STATUS 新)
 - §4.82 G3 执行计划补全: `partitionGraph` 覆盖分隔符(SumReduce/Softmax/CrossEntropy/Fused 切出独立子图) + A/B 设施编排执行; FC-MIMO(有依赖) 4/4 逐位一致(STATUS 新)
+- §4.83 拐点标定: Strict 判据全维度判对(6 维度, 拐点精确吻合) → **收益模型无需重设计(撤销待办②)**(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -54,7 +55,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → G3**: G1 数据齐(§4.76/4.77) + G2 影子(§4.78) + `partitionGraph` 切分 + A/B 实测**时间侧+数值侧均已完成**(§4.80/§4.81/§4.82: 不合并快 3.5-4%; 数值逐位一致 max_abs_diff=0, 含 FC-MIMO 有依赖切分 4/4)。**EXP-2 实测推翻 ADR-0002 方案 C** → ① 默认维持 Strict(不推进 Allow) ② 收益模型须纳入"单内核代码膨胀成本"(方向同方案 B 的严格规模上限) ③ 补实验(小维度/FC-MIMO/拐点标定; §4.82 已给 FC 反例: 该并不该拆) ④ G3 真接管(planner 判定参与执行决策) —— (HITL)。
+1. **通用图融合 → G3**: G1 数据齐(§4.76/4.77) + G2 影子(§4.78) + `partitionGraph` 切分 + A/B 实测**时间侧+数值侧均已完成**(§4.80/§4.81/§4.82: 不合并快 3.5-4%; 数值逐位一致 max_abs_diff=0, 含 FC-MIMO 有依赖切分 4/4)。**EXP-2 实测推翻 ADR-0002 方案 C** → ① 默认维持 Strict(已确认) ② ~~收益模型纳入代码膨胀成本~~ **撤销**(§4.83: ws 已正确建模膨胀成本, 判据全维度判对) ③ 补实验**完成**(§4.83: 拐点≈1.4~1.8MB) ④ G3 真接管(planner 判定参与执行决策) —— 待推进。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
@@ -168,7 +169,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
 | **P2** | 泛化融合仍处影子阶段, 未接管运行时 | planner 为旁路分析器(已进 G2 影子, §4.78); checkPattern/MIMO 仍手写; 未进 G3 真接管 | 常态开影子累积证据 + 代价判定重设计 → 进 G3; 触碰训练核心前过决策门 |
-| **P2** | region 代价判定收益模型 | ⚠️ ADR-0002 方案 C 前提被 EXP-2 推翻(§4.80): 实测**不合并反而快 3.5-4%**(26-29/30)。现收益模型(reload+launch)漏了"单内核代码膨胀成本" | 默认维持 Strict; 收益模型须纳入 codegen 质量项(方向: 严格规模上限); 补实验(小维度/FC-MIMO/拐点) |
+| **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
 
 ## Cross-Project Memory (Agent lessons, 跨项目适用)
 
