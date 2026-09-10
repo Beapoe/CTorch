@@ -604,3 +604,57 @@ TEST(FusionPlanner, PartitionMergedPlanYieldsSingleSubGraph) {
     EXPECT_EQ(subs.size(), 1u);
     EXPECT_EQ(subs[0].unit_node_ids.size(), 3u);   // {p, e1, r}
 }
+
+// ======================= 子图边界契约 (G3 编排前提) =======================
+// 以下两条刻画 partitionGraph 的边界语义, 是执行/编排层的硬约束:
+//   契约 1: Const 节点属 LEAF, 在子图中被暴露为"外部输入" → 驱动方必须喂其真实常量值。
+//   契约 2: region 分隔符(如 SumReduce)不进入任何 compute unit → 其产出不被子图覆盖。
+// 二者都会影响"子图执行计划是否完整", 故显式固化以防回归。
+
+// 契约 1: Const 节点作为子图外部输入出现, 且 input_orig_ids 能回指该 Const 节点。
+TEST(FusionPlanner, PartitionExposesConstAsExternalInputToDriver) {
+    Graph g;
+    auto d = TensorDesc::fromShape({4});
+    size_t x = g.addInput(d);
+    TensorDesc one_desc = TensorDesc::fromShape({1});
+    size_t one = g.addConstant(1.0, one_desc);   // 图内真实常量(非输入占位)
+    size_t sum = g.addNode(AddNode{d, one_desc}, {x, one}, d);
+    g.markOutput(sum);
+
+    // 强制不跨分量合并, 确保产生子图而非忽略
+    RegionFusionPolicy strict;
+    strict.min_benefit_ratio = 1.0;
+    strict.launch_unit_bytes = 0;
+    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, strict);
+    std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
+    ASSERT_FALSE(subs.empty());
+
+    // Const 必须出现在某个子图的 input_orig_ids 中(而不是被静默丢弃)
+    bool found = false;
+    for (const auto& s : subs)
+        for (size_t oid : s.input_orig_ids)
+            if (oid == one) found = true;
+    EXPECT_TRUE(found);
+}
+
+// 契约 2: SumReduce 是分隔符, 不进入任何子图; 其产出因此不被子图执行计划覆盖。
+TEST(FusionPlanner, PartitionDoesNotCoverRegionSeparatorOutput) {
+    Graph g;
+    auto dg = TensorDesc::fromShape({2, 4});
+    auto dr = TensorDesc::fromShape({4});
+    size_t grad = g.addInput(dg);
+    // SumReduce(axis=0): [2,4] -> [4], 属 region 分隔符
+    size_t reduced = g.addNode(SumReduceNode{dg, 0}, {grad}, dr);
+    g.markOutput(reduced);
+
+    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel);
+    std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
+
+    // 分隔符节点不得出现在任何子图的覆盖集合内
+    for (const auto& s : subs)
+        for (size_t nid : s.unit_node_ids) EXPECT_NE(nid, reduced);
+
+    // 该输出也不应由任何子图声称(驱动方需另行处理 → 见 runPartitionABTest 的 missing 计数)
+    for (const auto& s : subs)
+        for (size_t oid : s.output_orig_ids) EXPECT_NE(oid, reduced);
+}
