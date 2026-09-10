@@ -2045,3 +2045,33 @@ SiLU, 导致 FFN 的 MatMul+SiLU 融合即使命中也会算错或根本不被�
 **登记的后续项(新立项)**: 代价判定收益模型重设计——现 saved_reload(省外部输入重读)低估 MIMO 真实
 收益(应为"省中间量物化"), 但直接改会让 saved>=ws 恒真、判据退化为"总是合并", 需配独立第二约束
 (缓冲压力/region 节点数上限)。
+
+## 4.76 2026-09-10 G1 覆盖补齐: FC-MIMO 挂 reconcile + 一致率矩阵采全
+
+承接 §4.75。补齐 G1 一致率校验的覆盖缺口——此前 `BW-RECONCILE` 只挂在
+`compileFFNMIMOBackwardAsync`(FFN 专用), 通用 FC 路径 `compileUnifiedMIMOBackwardAsync`
+无对拍点, 其融合判定从未被校验。
+
+**改动(重构, 行为不变)**
+- 抽取共用私有方法 `C3BackwardCapture::diagnosePlannerReconcile(fused_graph, label, mimo_kernels)`:
+  原 FFN 版 46 行内联诊断块抽出, 参数化 label 与 MIMO 内核数; 输出加 `label=` 前缀。
+- FFN 路径改为调用 `diagnosePlannerReconcile(fused_graph, "FFN-MIMO", 1)`(行为逐位不变)。
+- FC 路径(`compileUnifiedMIMOBackwardAsync`)在 `markOutput` 之后、compile 之前插入
+  `diagnosePlannerReconcile(fused_graph, "FC-MIMO", 1)`。
+- 纯 off-path: env `C3_PLANNER_DIAG=1` 门控, 不触发编译/执行, 不改任何既有路径。
+
+**G1 一致率矩阵(2026-09-10 采集)**
+| 路径 | 默认模式 | 强制模式(C3_FORCE_REGION_MERGE=1) |
+|---|---|---|
+| FC-MIMO (MNIST, 图 12 节点) | **1** | **1** |
+| FFN-MIMO (8×16×32) | 1 | **1** |
+| FFN-MIMO (64×256×512) | 1 | **1** |
+| FFN-MIMO (128×1024×2048) | 0(代价门未过) | **1** |
+| FFN-MIMO (256×512×1024) | — | **1** |
+
+**结论**: 两条 MIMO 路径的**结构等价性**均 100% 一致(planner region 划分 == MIMO 单内核范围)。
+FC-MIMO 图 `comp=1`(单一连通分量) → 无需跨分量代价门, 默认即 reconciled=1;
+FFN-MIMO 大维度需强制模式绕过代价门(§4.75)。→ **G1 结构侧覆盖已齐**。
+
+**验证**: test_c3_graph 117 / backward max_diff=0 / swiglu 全过 / fusion_planner 17 /
+forward_capture 4 全绿; MNIST acc 97.1421% 与基线一致(默认路径未受影响)。

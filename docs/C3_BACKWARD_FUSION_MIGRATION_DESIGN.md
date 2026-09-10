@@ -114,7 +114,10 @@ region_metric[comp=2 reload=512KB launch=400KB ws=134MB merged=0]   # LLaMA-1B �
 ## 7. 建议的下一步(需洛锦排)
 1. ~~autotune launch 探针~~ → **证伪, 已移出前置**(见 §4.1): launch 税校准对 FFN reconcile 无正贡献。
    已改为**强制合并**(§4.2, 已落地)解耦结构验证与代价判定。
-2. **G1 覆盖率扩到 FC-MIMO + 稳态统计**: 在 `compileUnifiedMIMOBackwardAsync` 也挂 reconcile,
-   跑 MNIST/FFN 采集一致率矩阵, 给洛锦看数据再决定是否进 G2。
+2. **G1 覆盖率扩到 FC-MIMO + 稳态统计** → ✅ **挂载已完成(2026-09-10, STATUS §4.76)**:
+   抽取共用方法 `C3BackwardCapture::diagnosePlannerReconcile(fused_graph, label, mimo_kernels)`,
+   在 `compileUnifiedMIMOBackwardAsync` 与 `compileFFNMIMOBackwardAsync` 两处挂载(纯 off-path)。
+   实测一致率矩阵: **FC-MIMO 与 FFN-MIMO 的结构等价性均 100%**(FFN 大维度需强制模式绕过代价门)。
+   剩余: 稳态统计(多 epoch 聚合) 与 "是否进 G2" 的决策仍待定。
 3. **代价判定重设计(新立项)**: 修正收益模型(省中间量物化 vs 现行省外部输入重读),
    并补独立第二约束避免判据退化为"总是合并"。待强制合并跑通 G1 后启动。
