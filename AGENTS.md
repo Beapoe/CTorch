@@ -1,13 +1,13 @@
 # CTorch Agent Context
 
 > AI agent onboarding doc for **CTorch** — 笙歌/ShengFlow 团队的轻量级 C++ 深度学习框架。
-> Last updated: 2026-09-06 (session: sum/mean 断链 + FFN 反向 MIMO + 性能画像)
+> Last updated: 2026-09-10 (session: SiLU 提升为 c3 Graph 一等节点 → FFN forward 一致率可采)
 
 ## 项目一句话
 
-轻量级 C++ 深度学习框架, 类 PyTorch 接口, 核心是 **C3 JIT 编译器** (MLIR → LLVM IR → ExecutionEngine) + 区域融合 (region fusion) + MIMO 反向融合 + 多后端 kernel (CPU-BASIC / CPU-SIMD / AMX / MPS)。
+轻量级 C++ 深度学习框架, 类 PyTorch 接口, 核心是 **C3 JIT 编译器** (MLIR → LLVM IR → ExecutionEngine) + 区域融合 (region fusion) + MIMO 反向融合 + 多后端 kernel (CPU-BASIC / CPU-SIMD / AMX / MPS)。正在推进**通用图融合**: 用 FusionPlanner 判据取代手写融合 pattern(off-path 阶段)。
 
-## 当前状态 (2026-09-06 晚)
+## 当前状态 (2026-09-10)
 
 | 领域 | 状态 | 关键交付 |
 |------|------|----------|
@@ -19,27 +19,41 @@
 | **LLaMA FFN 反向 MIMO** | ✅ DONE | 无 bias SwiGLU FFN 整段反向→单内核 9 输出 (c3 12ac4c6, STATUS §4.59) |
 | LLaMA-1B FFN bench | ✅ 新增 | `bench_llama_ffn_train` (c3 vs eager ~5% 快, bwd ~8%) |
 | 论文 | ✅ 更新 | 中英 MIMO 节加"无 bias SwiGLU FFN"扩展 (本地 paper/, gitignored) |
+| **通用图融合: 判据层 FusionPlanner** | ✅ off-path | 前向 Default / backward RegionKernel / 代价门(reload+launch vs 峰值live ws); 12 单测 (c3) |
+| **forward 整图捕获 ForwardCapture** | ✅ off-path | 真实 eager 前向 MatMul→ReLU → GEMM_EPILOGUE (test_forward_capture) |
+| **deploy 校准 c3ctl + MachineFingerprint** | ✅ | 首部署校准写指纹 → 运行时 doCompile O(1) 读; launch 税实测(M3 ≈12KB) |
+| **真实 MNIST forward 一致率** | ✅ 3/3 | `C3_HOOK_CAPTURE=1` 旁路采集: 3 层 FC 各判单 GEMM_EPILOGUE == 现状 (主仓 1a105c7) |
+| **SiLU 提升为 c3 Graph 一等节点** | ✅ A+B | Graph SiLUNode + ForwardCapture/FusionPlanner 归类 + 执行层可编译(nodeVariantToOp/MLIR 发射/SiLUOpLowering); FFN forward 一致率可采 (STATUS §4.73) |
+| **hotpath SiLU 缺失修复(立项 C)** | ✅ 已修 | makeNodeVariant/isSupportedOp/isUnaryOp + MatMulActivation + epilogue lowering(act=4); MatMul+SiLU 融合数值正确 (STATUS §4.74) |
+| **region 强制合并(C3_FORCE_REGION_MERGE)** | ✅ 新增 | 解耦"结构是否正确"与"是否划算": 强制跳过代价门; FFN 4 维度 reconciled 全转 1; 默认行为不变 (STATUS §4.75) |
+| 迁移决策门 G0-G3 | 🟡 G1 结构侧达标 | `BW-RECONCILE` 强制模式下一致率 100%; 代价判定待重设计(新立项) |
 
-**最近变更速览** (详细日志见 `STATUS_CONTEXT.md` §4.53-4.59 + git log):
+**最近变更速览** (详细日志见 `STATUS_CONTEXT.md` §4.53-4.71 + git log):
 - §4.53 MatMul epilogue 向量化; §4.54 DEBT-2 降级 + MNIST 画像
 - §4.55 全量回归矩阵; §4.56/4.57 偷工减料审查+修复
 - §4.58 sum/mean 断链 + LLaMA-FFN bench; §4.59 FFN MIMO + sum-loss 断链遗留→已修(3085a6b)
+- §4.60 buildGt/Linalg 广播修复; §4.61 FusionPlanner 判据层; §4.62-4.66 RegionKernel+代价门+峰值live
+- §4.67 ForwardCapture; §4.68 backward 迁移决策门; §4.69 c3ctl+MachineFingerprint; §4.70 指纹运行时接入
+- §4.71 真实 MNIST forward 一致率 3/3 (C3_HOOK_CAPTURE, 主仓 1a105c7)
+- §4.73 SiLU 提升为 c3 Graph 一等节点(STATUS 新); FFN forward 一致率可采
+- §4.74 立项 C: 修 hotpath SiLU 缺失(STATUS 新); MatMul+SiLU 融合数值正确
+- §4.75 region 强制合并解耦结构/代价(STATUS 新); launch 税校准前置被证伪
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
 - LLaMA FFN(128×4096×11008): C3 ~180ms/step vs eager ~190ms (bwd MIMO ~8% 快)
 - MIMO 命中: MNIST mimo_hit 4678/epoch; FFN mimo_hit 命中, bw_hit 66→16
 
-## 🔧 下一步待办 (2026-09-06)
+## 🔧 下一步待办 (2026-09-10)
 
-0. **部署时自适应校准(新设计)**: GEMM 合并/线程/opt-level/向量宽等**硬件相关决策**不应拍板或特化。
-   探针(M3)证实 GEMM 合并在 M=64..2048 全程不占优, 但跨硬件会分化。
-   → 设计 `docs/C3_DEPLOY_AUTOTUNE_DESIGN.md`(机器性能指纹, 首跑校准持久化)。实现前先批 scope。
-1. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策改走第 0 条自适应校准。
-2. **修 pre-existing standalone 失败**: test_c3_pgo_deopt/compile_error 已修绿; 仍红 = test_relu_backward
-   (MPS 设备类型崩溃, 不经 C3)、test_region_fusion(性能退化, bench 波动类)。
-3. DCU 节点验证 + x86 AVX-512 实测 (曙光智算, 机时充足; 正好验证自适应校准的跨机分化)。
-4. forward 优化 + RC2 进程级异步 (c3d, docs/C3_PROCESS_ASYNC_*)。
+0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
+1. **通用图融合 → 进 G2**: SiLU 一等节点已补(STATUS §4.73) + region 强制合并已加(§4.75)。G1 **结构侧达标**(强制模式下 FFN 4 维度 reconciled 全 1, planner 划分 == MIMO 范围)。剩余: ① 代价判定收益模型重设计(见已知未解决 P2, 新立项); ② G1 覆盖率扩到 FC-MIMO; ③ 据结果决定是否进 G2(影子接管)。
+2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
+3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
+4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
+5. **修 pre-existing standalone 失败**: test_c3_pgo_deopt/compile_error 已修绿; 仍红 = test_relu_backward (MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化, bench 波动类)。
+6. DCU 节点验证 + x86 AVX-512 实测 (曙光智算, 机时充足; 正好验证自适应校准跨机分化)。
+7. forward 优化 + RC2 进程级异步 (c3d, docs/C3_PROCESS_ASYNC_*)。
 
 ## 设计蓝图 (docs/, 多未实现)
 
@@ -64,6 +78,10 @@
 | Linalg fused IR gen | `c3/src/C3/LinalgFusedGen.cpp` (SiLU/ReLU/Sigmoid 等 fused body) |
 | SIMD 真向量化 | `include/kernels/SIMDMath.h` + `src/kernels/CPU-SIMD/SIMDMath.cpp` |
 | Backward graph 捕获 | `c3/src/C3/C3BackwardCapture.cpp` |
+| 通用融合判据层 | `c3/include/C3/FusionPlanner.h` + `c3/src/C3/FusionPlanner.cpp` |
+| forward 整图捕获 | `c3/include/C3/ForwardCapture.h` + `c3/src/C3/ForwardCapture.cpp` |
+| deploy 机器指纹 | `c3/include/C3/MachineFingerprint.h` + `tools/c3ctl.cpp` |
+| 融合迁移决策门设计 | `docs/C3_BACKWARD_FUSION_MIGRATION_DESIGN.md` + `docs/C3_UNIVERSAL_FUSION_DESIGN.md` |
 | 新算子协议 | `PEL25 §6` + 文档沉淀 → `/Users/ghostface/skills/prompts/new-module-prompt.md` |
 
 ## 构建 & 测试
@@ -98,6 +116,11 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 - `C3_DISABLE_REGION_FUSION=1` 关闭 region fusion
 - `C3_DISABLE_SINGLE_KERNEL=1` 关闭单 kernel 编译触发
 - `C3_ENABLE_BACKWARD=0` 关 C3 backward(走 eager; 注意 forward 仍可能走 C3 单 kernel, 非纯 eager 对照)
+- `C3_HOOK_CAPTURE=1` 真实训练 forward 整图旁路采集(MNIST/FFN 一致率, off-path)
+- `C3_PLANNER_DIAG=1` 真实 fused_graph 上 planner 分区 + BW-RECONCILE(off-path)
+- `C3_FORCE_REGION_MERGE=1` 强制 region 跨分量合并(跳过代价门, 只验结构等价性; 代价判定后补)
+- `C3_FINGERPRINT=<path>` 覆盖机器指纹配置路径(默认 ./c3.fingerprint); 由 `c3ctl calibrate` 生成
+- `c3ctl calibrate --label <m>` 部署时跑机器探针写指纹; `c3ctl show` 用运行时 O(1) 读回
 
 ## PEL25 §6 新算子开发协议 (Stage 1-4 沉淀)
 
@@ -131,8 +154,11 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | **P1** | sum-loss(非 CE 头)场景若图含无关死分支 | 已修: ComputeCore 活跃子图依赖重算(3085a6b); 正常 CE loss 训练不受影响 | 保留回归 test_sum_mean_grad(18 断言) |
 | **P1** | Stage 5.2 ARM NEON fused 0.77x (反直觉) | x86 AVX-512 + DCU 预期显著加速 | Stage 5.4 DCU 验证 |
 | **P1** | x86 AVX-512 实测未做 | 曙光智算机时充足 | Stage 5.4 |
+| ~~P1~~ | ~~hotpath SiLU 缺失~~ | ✅ 已修(立项 C, STATUS §4.74): makeNodeVariant/isSupportedOp/isUnaryOp/MatMulActivation + epilogue lowering 全补齐 | 残留仅"无 bias FFN fused_hit=0"这一既有 P1, 与 SiLU 正确性无关 |
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
+| **P2** | 泛化融合判据/捕获/校准全 off-path, 未接管运行时 | planner 是旁路分析器; checkPattern/MIMO 仍手写; 未进 G2(需一致率+决策门) | 收 forward/FFN 一致率 → 进 G2; 触碰训练核心前过决策门 |
+| **P2** | region 代价判定收益模型待重设计 | 现 `saved_reload`(省外部输入重读)低估 MIMO 真实收益(应为"省中间量物化"); 但直接改会让 saved>=ws 恒真、判据退化为"总是合并" | 需配独立第二约束(缓冲压力/region 节点数上限); 强制合并已先解耦, 此项新立项 |
 
 ## Cross-Project Memory (Agent lessons, 跨项目适用)
 
@@ -184,7 +210,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 
 | 关注点 | 测试 target | 备注 |
 |--------|-------------|------|
-| C3 graph + Benchmark 全量 | `test_c3_graph`(build-release) | 115 断言含 MLP/MLIR, 必过 |
+| C3 graph + Benchmark 全量 | `test_c3_graph`(build-release) | 117 断言含 MLP/MLIR + SiLU JIT 执行 + MatMul+SiLU epilogue, 必过 |
 | **sum/mean 梯度回归** | `test_sum_mean_grad`(build-release) | 18 断言(sum/mean/dim/dims/DotNode 断链回归) |
 | 反向正确性 | `test_c3_backward` | max_diff=0 |
 | MNIST 端到端训练 | `test_c3_mnist_train`(根目录) | acc 97.1421% 基线 |
@@ -196,3 +222,8 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | C3 compile pipeline | `test_c3_compile_merged` `test_c3_compile_merged_pgo` | 10/11 断言 |
 | 反向 fusion/DEBT | `test_fused_bw_debt2` | fused BW 默认 off, sanity |
 | pgo/错误路径(已修绿) | `test_c3_pgo_deopt` `test_c3_compile_error` | bad_weak_ptr 已修 |
+| 泛化判据层 | `test_fusion_planner` | 17 断言(Default/RegionKernel/代价门/强制合并 + SiLU 归类) |
+| forward 整图捕获 | `test_forward_capture` | 真实前向 capture+plan(含 MatMul+SiLU) |
+| deploy 指纹 O(1) 读 | `test_machine_fingerprint` | save/load/桥接/回退 |
+| forward 一致率采集 | `test_c3_mnist_train` + `C3_HOOK_CAPTURE=1` | MNIST fwd 3/3(off-path) |
+| FFN forward 一致率采集 | `bench_llama_ffn_train` + `C3_HOOK_CAPTURE=1` | FFN fwd nodes=14, 1×GEMM_EPILOGUE(MatMul+SiLU)+3×GEMM(off-path) |

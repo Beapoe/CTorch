@@ -1945,3 +1945,103 @@ c3 `86e84e4`; main `6537739`。均已 push。
 - 3 个 GEMM_EPILOGUE 单元(n=3, n=3, n=2) == 3 层 FC(MatMul+Add+ReLU x2 + MatMul+Add)各自单内核。
 - **forward 侧一致率 3/3**: planner 划分与现状 checkPattern 逐层单内核一致(首个真实训练证据)。
 - 配 backward FFN BW-RECONCILE(不一致但已解释), 构成进 G2 的真实决策数据。
+
+## 4.72 2026-09-09 刷新项目上下文 AGENTS.md → 2026-09-09 基线(待测新模式占位)
+
+为即将测试的新模式把 onboarding 上下文固化为基线:
+- AGENTS.md Last updated → 2026-09-09; 当前状态表加通用图融合(FusionPlanner/ForwardCapture/
+  c3ctl+MachineFingerprint/MNIST fwd 3-3/决策门 G0-G3), 日期改 2026-09-09。
+- 最近变更速览扩到 §4.71; 下一步待办重排: #0=待测新模式占位, #1=收 forward/FFN 一致率+进 G2,
+  其余(部署校准扩展/standalone/DCU/forward)顺延。
+- 关键路径速查加泛化组件; 关键开关加 C3_HOOK_CAPTURE/C3_PLANNER_DIAG/C3_FINGERPRINT/c3ctl;
+  Test 矩阵加 test_fusion_planner/forward_capture/machine_fingerprint/hook; 已知未解决加
+  "泛化融合未接管运行时(off-path)"。
+- 开测新模式前以本文件当前状态/已知未解决为对照; 测完结果回填 AGENTS.md 下一步待办 #0。
+
+## 4.73 2026-09-10 SiLU 提升为 c3 Graph 一等节点(收 FFN forward 一致率, off-path + 可执行)
+
+补 AGENTS 待办 #1 前置缺口: FFN 前向用 silu、MNIST 用 relu, 而 c3 Graph NodeVariant 缺一等
+SiLUNode, 导致 ForwardCapture 遇 autograd SiLUNode 报 unsupported(整图捕获失败)、FusionPlanner
+把它判 LEAF(MatMul 尾链不成 GEMM_EPILOGUE)。本次把 SiLU 提升为 c3 一等公民, 覆盖 A(off-path
+采集) + B(执行层可编译), C(hotpath 真实路径激活)单独立项。
+
+改动(c3 feature-dcu-optimize, 未提交):
+- Graph.h: 新增 ct::c3::SiLUNode{name="SiLU", in_desc}, 追加到 NodeVariant **末尾**(index=18,
+  保 0-17 不动; 加索引稳定性警告——C3Engine/PGOManager 的 nodeVariantToOp 依赖 switch(index))。
+- ForwardCapture.cpp buildOpVariant: 加 SiLUNode 映射(autograd "SiLUNode"→ct::c3 SiLUNode)。
+- FusionPlanner.cpp nodeKind: SiLU 加入 ELEMENTWISE 族; FusionPlanner.h 元素族文档同步。
+- C3Engine.cpp + PGOManager.cpp 两份 nodeVariantToOp: 加 case 18 → op::SiLU。
+- MLIRKernelGen.cpp: 单节点发射(buildMLIRModule) + 多节点 per-node 发射各加 SiLUNode→c3::SiLUOp。
+- C3DialectLowering.cpp: 新增 SiLUOpLowering(仿 SigmoidOpLowering, x/(1+exp(-x)), 与 eager
+  CPU-BASIC 参考一致), 注册进 runC3Lowering。此前 C3_SiLUOp 已定义但无 lowering(潜伏 op)。
+
+验证:
+- test_fusion_planner 12→15(加 SiLUIsElementwise/GemmSiLUEpilogue/SiLUChainsWithElementwise)。
+- test_forward_capture 2→4(加 MatMulSiLUCaptureAndPlan/SiluOnlyCapturesAsElementwise)。
+- test_c3_graph 115→116(加 JITCompile.SiLUGraphExecute: 单节点 silu 图编译执行, 与 eager
+  tensorsAllClose 通过——执行层闭环真实打通)。
+- bench_llama_ffn_train + C3_HOOK_CAPTURE=1: FFN fwd graph nodes=14 inputs=7 compute_units=4
+  = 1×GEMM_EPILOGUE(n=3, 即 x@W_gate→silu) + 3×GEMM(n=1)。**FFN forward 一致率可采**。
+
+发现(未修, 立项 C): 真实 FFN 运行时触发 `[FUSE-COMPILE] MatMul+SiLU|op5..op28`, 但
+C3HotPathManager makeNodeVariant 无 case op::SiLU → default 静默返回 SigmoidNode(=把 silu 当
+sigmoid 编译的潜伏正确性 bug); isSupportedOp/一元掩码也不含 op::SiLU。当前 fused_hit=0 未爆发。
+修复属运行时路径改动(触及红线邻近区 C3HotPathManager), 经洛锦确认单独立项, 本次仅标注。
+
+## 4.74 2026-09-10 立项 C: 修 hotpath SiLU 缺失 → MatMul+SiLU 融合正确 lowering
+
+修上一轮(§4.73)标注的 hotpath SiLU 缺失正确性 bug。此前 `makeNodeVariant` 无 case op::SiLU
+→ default 静默返回 SigmoidNode(把 silu 当 sigmoid 编译), 且 isSupportedOp/isUnaryOp 掩码不含
+SiLU, 导致 FFN 的 MatMul+SiLU 融合即使命中也会算错或根本不被支持。
+
+改动(c3 feature-dcu-optimize, 未提交):
+- C3HotPathManager.h: buildGraphForOp 加 case op::SiLU(单算子图); makeNodeVariant 加 case
+  op::SiLU(修 default→Sigmoid 错映射); isSupportedOp 位掩码 + isUnaryOp 位掩码各加 op::SiLU。
+- MLIRKernelGen.cpp: MatMulActivation 枚举加 SiLU(=4); epilogue 识别加 holds_alternative<SiLUNode>。
+- C3DialectLowering.cpp: buildSmallMatMul(act==4) + MatMul epilogue vector/scalar 分支(act==4)
+  加 silu = x/(1+exp(-x)) lowering(与 eager 参考一致)。
+
+验证:
+- 新增 test_c3_graph::MatMulEpilogueSiLUMultiNode: MatMul→SiLU 融合图编译执行, 与 eager
+  matMul().silu() tensorsAllClose 通过(act==4 lowering 正确)。test_c3_graph 116→117。
+- FFN bench(小维): fused_entries=1(MatMul+SiLU 编译产物入库), 但 fused_hit=0 仍是既有 P1
+  (无 bias FFN 编译不执行, 与 AGENTS 一致), 非本修复范畴。
+- 全量回归: test_c3_graph 117 / backward max_diff=0 / swiglu 全过 / fusion_planner 15 /
+  forward_capture 4 全绿。
+- **MNIST 训练无回归**: 最终 acc=97.1421%(与基线一致), fused_hit=4678(与基线一致), 证明改
+  hotpath 位掩码未破坏 ReLU 路径。
+
+残留: 进 G2 时若 FFN 无 bias 融合真正命中, 数值已正确(本次修的正是"命中时算错"的隐患)。
+
+## 4.75 2026-09-10 解耦 region 结构验证与代价判定: 强制合并模式(C3_FORCE_REGION_MERGE)
+
+承接 §4.74。尝试推进"launch 税 autotune 校准"作为 G1→G2 前置时, **先验证前提 → 前提被证伪**。
+
+- 实测三维度(C3_PLANNER_DIAG=1): 8x16x32/64x256x512 merged=1; 128x1024x2048 merged=0
+  (reload=131072 launch=409600 ws=7340032, 门槛 0.25*ws=1835008 → 缺口 1294336)。
+- **根因不是 launch 税**: ws 随维度线性增长且远大于 reload(差 56x), launch 是维度无关常数 →
+  维度越大门槛越高, 必然 merged=0。反事实: 把 launch 校准到机器实测 12KB 会让差距**更大**
+  (528KB→140KB vs 门槛 1792KB)。→ 设计文档"autotune launch 探针是 G1→G2 前置"**证伪**。
+- 诊断报告: work/reports/2026-09-10/bw-reconcile-root-cause-diagnosis.md
+
+**落地: 强制合并模式(接受洛锦方案"先强制启用融合, 代价判定后补")**
+- FusionPlanner.h: RegionFusionPolicy 加 `force_merge`(默认 false = 现有行为)。
+- FusionPlanner.cpp: merged 判定在 force_merge 时跳过收益门槛, 保留结构前提
+  (component_count>1 && has_shared_ext); 度量仍填充供观测。
+- C3Config.h: 新增 `C3_FORCE_REGION_MERGE=1` 开关(forceRegionMergeEnabled());
+  fromMachineDefaults() 读该开关。
+- C3BackwardCapture.cpp 诊断: region_metric 加 force 字段; mismatch 文案修正为
+  "代价门未过(可分离)" vs "结构不可并"(force 下仍 mismatch)。
+
+**验证**
+- 强制模式 4 维度(8x16x32 / 64x256x512 / 128x1024x2048 / 256x512x1024): **reconciled 全部 = 1**
+  (planner_wants=1 == MIMO 单内核) → G1 结构等价性口径下一致率达标。
+- 默认模式(无 env)行为逐位不变: 128x1024x2048 仍 merged=0/force=0/reconciled=0。
+- test_fusion_planner 15→17(加 ForceMergeBypassesCostGate / ForceMergeStillRequiresSharedExternal,
+  后者验证强制不越过"结构不可并"——无共享外部输入仍割开)。
+- 全量回归: test_c3_graph 117 / backward max_diff=0 / swiglu 全过 / forward_capture 4 /
+  **MNIST acc 97.1421%(基线一致)**。
+
+**登记的后续项(新立项)**: 代价判定收益模型重设计——现 saved_reload(省外部输入重读)低估 MIMO 真实
+收益(应为"省中间量物化"), 但直接改会让 saved>=ws 恒真、判据退化为"总是合并", 需配独立第二约束
+(缓冲压力/region 节点数上限)。

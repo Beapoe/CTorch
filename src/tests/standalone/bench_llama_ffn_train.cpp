@@ -33,6 +33,8 @@
 #include "C3/C3BackwardCapture.h"
 #include "C3/C3Config.h"
 #include "C3/C3Cleanup.h"
+#include "C3/ForwardCapture.h"       // [HOOK] forward 整图捕获(旁路采集)
+#include "C3/FusionPlanner.h"       // [HOOK] 通用融合判据(旁路采集)
 
 extern "C" void cblas_saxpy(const int N, const float alpha, const float *X, const int incX,
                             float *Y, const int incY);
@@ -170,6 +172,27 @@ int main(int argc, char** argv) {
                   << " W_u=" << (W_u.grad_ptr() ? "ok" : "NULL")
                   << " W_d=" << (W_d.grad_ptr() ? "ok" : "NULL") << "\n";
         W_g.zero_grad(); W_u.zero_grad(); W_d.zero_grad(); W_cls.zero_grad();
+    }
+
+    // [HOOK 旁路采集] C3_HOOK_CAPTURE=1: 真实 FFN forward 整图捕获 + planner 分区。
+    // (默认关, 不改训练行为/结果; 作进 G2 的 forward 一致率决策数据。与 MNIST 同款)
+    {
+        static const bool hook = [] { const char* e = std::getenv("C3_HOOK_CAPTURE"); return e && *e == '1'; }();
+        if (hook) {
+            Tensor loss = step_fn();
+            auto cap = ct::c3::ForwardCapture::capture(loss);
+            if (!cap.ok) {
+                fprintf(stderr, "[HOOK] FFN capture_FAIL: %s\n", cap.error.c_str());
+            } else {
+                auto plan = ct::c3::FusionPlanner::planUnits(cap.graph);
+                fprintf(stderr, "[HOOK] FFN fwd graph nodes=%zu inputs=%zu compute_units=%zu\n",
+                        cap.graph.nodeCount(), cap.graph.inputCount(), plan.compute_unit_count);
+                for (const auto& u : plan.units) {
+                    if (!u.isCompute()) continue;
+                    fprintf(stderr, "[HOOK]   unit kind=%d n=%zu\n", (int)u.kind, u.node_ids.size());
+                }
+            }
+        }
     }
 
     double fwd_ms = 0, bwd_ms = 0, upd_ms = 0;

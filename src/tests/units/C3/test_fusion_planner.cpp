@@ -186,6 +186,65 @@ TEST(FusionPlanner, SharedGemmNotMerged) {
     EXPECT_TRUE(has_mm2_ext);
 }
 
+// ======================= SiLU 逐元素归类 =======================
+// [SiLU 一等节点] Graph 层新增 SiLUNode 后，判据必须把它与 ReLU/Sigmoid/Tanh
+// 同等对待(逐元素族)，否则 FFN 前向的 silu 会被判 LEAF、MatMul 尾链无法成
+// GEMM_EPILOGUE（这正是 AGENTS 待办 #1 要补的缺口）。
+
+TEST(FusionPlanner, SiLUIsElementwise) {
+    Graph g;
+    auto d6 = TensorDesc::fromShape({6});
+    size_t x = g.addInput(d6);
+    size_t silu = g.addNode(SiLUNode{d6}, {x}, d6);
+    g.markOutput(silu);
+
+    FusionPlan plan = FusionPlanner::planUnits(g);
+    const FusionUnit* u = unitContaining(plan, silu);
+    ASSERT_NE(u, nullptr);
+    EXPECT_TRUE(u->isCompute());
+    EXPECT_EQ(u->kind, FusionUnitKind::ELEMENTWISE);
+    EXPECT_EQ(plan.compute_unit_count, 1u);
+}
+
+// MatMul + SiLU 单消费者尾链 → GEMM_EPILOGUE（LLaMA FFN 的 x@W_gate 后接 silu）
+TEST(FusionPlanner, GemmSiLUEpilogueSingleUnit) {
+    Graph g;
+    auto xd = TensorDesc::fromShape({2, 3});
+    auto wd = TensorDesc::fromShape({3, 4});
+    auto md = TensorDesc::fromShape({2, 4});
+    size_t x = g.addInput(xd);
+    size_t w = g.addInput(wd);
+    size_t mm = g.addNode(MatMulNode{xd, wd}, {x, w}, md);
+    size_t silu = g.addNode(SiLUNode{md}, {mm}, md);
+    g.markOutput(silu);
+
+    FusionPlan plan = FusionPlanner::planUnits(g);
+    const FusionUnit* umm = unitContaining(plan, mm);
+    ASSERT_NE(umm, nullptr);
+    EXPECT_EQ(umm->kind, FusionUnitKind::GEMM_EPILOGUE);
+    EXPECT_EQ(plan.unitOf(silu), umm);
+    EXPECT_EQ(umm->node_ids.size(), 2u);
+    EXPECT_EQ(umm->numel, nodeNumelOf({2, 4}));
+}
+
+// SiLU 与其它逐元素算子共处一个 ELEMENTWISE 单元(Mul 门控: SwiGLU 的 g*u 形态)
+TEST(FusionPlanner, SiLUChainsWithElementwise) {
+    Graph g;
+    auto d6 = TensorDesc::fromShape({6});
+    size_t x = g.addInput(d6);
+    size_t u = g.addInput(d6);
+    size_t gate = g.addNode(SiLUNode{d6}, {x}, d6);
+    size_t h = g.addNode(MulNode{d6, d6}, {gate, u}, d6);   // SwiGLU 门控
+    g.markOutput(h);
+
+    FusionPlan plan = FusionPlanner::planUnits(g);
+    const FusionUnit* ug = unitContaining(plan, gate);
+    ASSERT_NE(ug, nullptr);
+    EXPECT_EQ(ug->kind, FusionUnitKind::ELEMENTWISE);
+    EXPECT_EQ(plan.unitOf(h), ug);
+    EXPECT_EQ(ug->node_ids.size(), 2u);
+}
+
 // ======================= RegionKernel: 共享中间量 → 单 region =======================
 // 复现 MIMO 语义: 一个中间量被多个 GEMM 消费(多输出), region 策略应并成单内核,
 // 而默认(多消费者必物化/双 GEMM 不并)会切成多个单元。
@@ -301,6 +360,61 @@ static SharedExternalGraph buildTwoChainsSharedExternal(size_t numel = 1000) {
     out.g.markOutput(out.e1);
     out.g.markOutput(out.r);
     return out;
+}
+
+// ======================= 强制合并（跳过代价门）=======================
+// [2026-09-10] 解耦"划分是否正确"(结构等价性) 与"划分是否划算"(收益模型):
+// 强制模式下只要结构可并(多分量 + 共享外部输入)就并, 不做收益判定。
+
+TEST(FusionPlanner, ForceMergeBypassesCostGate) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    RegionFusionPolicy policy;
+    policy.min_benefit_ratio = 1.0;   // 默认口径下明确不划算 → 不并
+    policy.launch_unit_bytes = 0;
+
+    // 默认: 代价门拦住 → 2 个 region
+    FusionPlan strict = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_FALSE(strict.region_metric.merged);
+    EXPECT_EQ(strict.compute_unit_count, 2u);
+
+    // 强制: 跳过收益判定 → 并成 1 个 region(结构可并前提成立)
+    policy.force_merge = true;
+    FusionPlan forced = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_TRUE(forced.region_metric.merged);
+    EXPECT_EQ(forced.compute_unit_count, 1u);
+    const FusionUnit* u = forced.unitOf(sg.p);
+    ASSERT_NE(u, nullptr);
+    EXPECT_EQ(u->kind, FusionUnitKind::REGION_KERNEL);
+    EXPECT_EQ(u->node_ids.size(), 3u);   // {p, e1, r}
+    // 强制模式仍填充度量供观测(不做判定依据)
+    EXPECT_EQ(forced.region_metric.component_count, 2u);
+    EXPECT_EQ(forced.region_metric.saved_reload_bytes, 1000ull);
+}
+
+// 强制合并不应越过"结构不可并": 无共享外部输入的分量仍须割开
+TEST(FusionPlanner, ForceMergeStillRequiresSharedExternal) {
+    Graph g;
+    auto d = TensorDesc::fromShape({2, 3});
+    size_t x = g.addInput(d);
+    size_t y = g.addInput(d);
+    // 链1: x -> Neg -> ReLU; 链2: y -> Neg -> Tanh（各自独立, 无共享外部输入）
+    size_t p = g.addNode(NegNode{d}, {x}, d);
+    size_t e1 = g.addNode(ReLUNode{d}, {p}, d);
+    size_t r = g.addNode(NegNode{d}, {y}, d);
+    size_t e2 = g.addNode(TanhNode{d}, {r}, d);
+    g.markOutput(e1);
+    g.markOutput(e2);
+
+    RegionFusionPolicy policy;
+    policy.force_merge = true;   // 即使强制, 无共享外部输入也无"并"的意义
+    FusionPlan region = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, policy);
+    EXPECT_FALSE(region.region_metric.merged);
+    EXPECT_EQ(region.compute_unit_count, 2u);
+    const FusionUnit* up = region.unitOf(p);
+    const FusionUnit* ur = region.unitOf(r);
+    ASSERT_NE(up, nullptr);
+    ASSERT_NE(ur, nullptr);
+    EXPECT_NE(up, ur);
 }
 
 TEST(FusionPlanner, RegionKernelCostMergeWorthy) {

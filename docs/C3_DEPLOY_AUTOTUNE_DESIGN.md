@@ -119,3 +119,17 @@ C3 的许多优化决策是**硬件相关**的, 不能拍脑袋定, 也无法跨
 - 实测 M3: bandwidth≈24.6GB/s, launch_us≈0.486 → launch_unit_bytes≈12KB。
 - 下一步: 把其余决策域(GEMM 分 shape 策略/线程/opt_level)逐个并入 c3ctl 校准 + 指纹 schema 扩 JSON;
   并把 fromMachineDefaults 接进运行时真正消费 planner 代价门的位置(待运行时接管后)。
+
+### 11.1 澄清(2026-09-10): launch 税校准 ≠ backward reconcile 前置
+
+实测证伪了一个原假设——**launch 税校准对 FFN MIMO 的 BW-RECONCILE 一致率无正贡献**:
+
+- 代价门判据 `merged = (reload + launch) > ratio * ws`。实测 `ws` 随维度线性增长且远大于 `reload`
+  (128×1024×2048: 7340032 vs 131072, 差 56x), 而 `launch` 是与维度无关的常数。
+- 把 launch 从 400KB 校准到机器实测 12KB, 使 `reload+launch` 从 528KB 降到 140KB,
+  而门槛是 1792KB → **距达标更远**。
+- 故 `C3_BACKWARD_FUSION_MIGRATION_DESIGN.md` 曾把 "autotune launch 探针" 列为 G1→G2 前置,
+  该条**已撤销**; 现改为"强制合并"解耦结构验证与代价判定(见该文档 §4.2)。
+
+**launch 税校准本身仍有价值**(它让代价门参数反映真实机器), 只是它**不是** backward 一致率的
+瓶颈所在; 瓶颈在收益模型 `ws` 项与相对门槛的组合, 需独立重设计。

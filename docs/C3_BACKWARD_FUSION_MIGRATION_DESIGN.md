@@ -43,7 +43,10 @@ G3 接管        以 planner+代价门为唯一判定; MIMO 目录降为 fallbac
 
 **放行条件(硬)**
 - G1: MNIST + FFN 每次 MIMO 命中, `[BW-RECONCILE]` 一致率 ≥ 阈值(建议初始 100%, 即 planner 判定
-  恒与 MIMO 范围一致; 不一致必须可解释——例如 FFN 当前 mismatch 是因 launch 税低估)。
+  恒与 MIMO 范围一致; 不一致必须可解释)。
+  > 口径澄清(2026-09-10): G1 校验的是**结构等价性**(planner 的 region 划分范围 == MIMO 单内核范围),
+  > 故应在**强制合并模式**(`C3_FORCE_REGION_MERGE=1`)下取一致率——代价门判"划不划算"是另一层,
+  > 见 §4.2。
 - G3: 覆盖结构全部 reconciled, 且单测/端到端 max_diff=0, 无 fallback 次数上升。
 
 ## 4. 已知的不一致: 为什么 planner 现在 ≠ MIMO(FFN)
@@ -51,13 +54,46 @@ G3 接管        以 planner+代价门为唯一判定; MIMO 目录降为 fallbac
 FFN 真实 fused_graph 对拍(`C3_PLANNER_DIAG`):
 ```
 [BW-RECONCILE] mimo_kernels=1 planner_wants=2 reconciled=0
-region_metric[comp=2 reload=512KB launch=400KB ws=134MB merged=0]
+region_metric[comp=2 reload=512KB launch=400KB ws=134MB merged=0]   # LLaMA-1B 真实维度
 ```
-MIMO 发 1 个内核; planner 保守代价门判 2 个 region。差异**可解释**:
-launch 税(现 400KB 等价)低估了真实多输出 dispatch 开销, 且 ws=134MB 的峰值 live 偏大,
-使代价门不敢并。**这不是 planner 判据错, 是代价门参数没校准**——校准即需 autotune 实测
-launch 税(设计 `C3_DEPLOY_AUTOTUNE_DESIGN.md` 已列该校准域)。所以 G1→G3 的前置之一是
-**先做 autotune launch 探针**, 否则 G1 一致率恒不达标。
+
+### 4.1 根因修正(2026-09-10, 实测证伪原归因)
+
+> **原文归因("launch 税低估 → 校准后即可转 1")经实测证伪**, 详见
+> `work/reports/2026-09-10/bw-reconcile-root-cause-diagnosis.md`。
+
+实测三维度(`C3_PLANNER_DIAG=1`, off-path):
+
+| BS×HID×INT | saved_reload | saved_launch | ws | 门槛 0.25×ws | merged |
+|---|---|---|---|---|---|
+| 8×16×32 | 128 | 409600 | 2560 | 640 | 1 |
+| 64×256×512 | 16384 | 409600 | 524288 | 131072 | 1 |
+| 128×1024×2048 | 131072 | 409600 | 7340032 | 1835008 | 0 |
+
+**真正主因**: `ws`(峰值 live 中间量)随维度线性增长且绝对值远大于 `saved_reload`
+(128×1024×2048 下差 56x), 而 `saved_launch` 是与维度无关的常数 →
+维度越大 `0.25×ws` 门槛越高, `reload + launch` 越追不上 → **必然 merged=0**。
+把 launch 税"校准"到机器实测 12KB 反而让差距**更大**(528KB→140KB vs 门槛 1792KB)。
+
+结论: **launch 税校准对 FFN reconcile 无正贡献**, 不应作为 G1→G2 前置。
+
+### 4.2 解耦方案: 强制合并(已落地 2026-09-10)
+
+既然瓶颈在"收益模型"而非"结构划分", 把两个正交问题解耦:
+
+- **结构正确性**(planner 划分 vs MIMO 范围是否等价) → 用**强制合并**验证, 跳过代价门
+- **代价判定**(该不该并是否划算) → 作为**独立优化层后补**
+
+实现: `RegionFusionPolicy::force_merge`(默认 false) + env `C3_FORCE_REGION_MERGE=1`。
+强制模式下只要结构可并(`component_count > 1 && has_shared_ext`)就并, 不做收益判定;
+`reload/launch/ws` 度量仍填充供观测。
+
+实测(强制模式, 4 维度): **reconciled 全部 = 1**(planner_wants=1 == MIMO 单内核)。
+
+**待补(登记的后续项)**: 代价判定需重新设计收益模型——当前
+`saved_reload`(省外部输入重读) 低估了 MIMO 的真实收益(应为"省中间量物化");
+但直接改成内联中间量会让 `saved ≥ ws` 恒真、判据退化为"总是合并",
+需配独立第二约束(缓冲压力/region 节点数上限)。此项在强制合并跑通后单独立项。
 
 ## 5. 风险 / 边界 / 红线
 
@@ -76,7 +112,9 @@ launch 税(设计 `C3_DEPLOY_AUTOTUNE_DESIGN.md` 已列该校准域)。所以 G1
 - 本文件: G0-G3 决策门 + 放行条件。
 
 ## 7. 建议的下一步(需洛锦排)
-1. **autotune launch 探针**(最优先): 让代价门 launch 项用机器实测, FFN reconcile 才有望转 1,
-   否则 G1 一致率恒不达标。
-2. **G1 覆盖率扩到 FC-MIMO + 稳态统计**: 在 compileUnifiedMIMOBackwardAsync 也挂 reconcile,
+1. ~~autotune launch 探针~~ → **证伪, 已移出前置**(见 §4.1): launch 税校准对 FFN reconcile 无正贡献。
+   已改为**强制合并**(§4.2, 已落地)解耦结构验证与代价判定。
+2. **G1 覆盖率扩到 FC-MIMO + 稳态统计**: 在 `compileUnifiedMIMOBackwardAsync` 也挂 reconcile,
    跑 MNIST/FFN 采集一致率矩阵, 给洛锦看数据再决定是否进 G2。
+3. **代价判定重设计(新立项)**: 修正收益模型(省中间量物化 vs 现行省外部输入重读),
+   并补独立第二约束避免判据退化为"总是合并"。待强制合并跑通 G1 后启动。

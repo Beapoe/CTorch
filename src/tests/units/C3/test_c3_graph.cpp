@@ -591,6 +591,38 @@ TEST(JITCompile, MulGraphExecute) {
     EXPECT_TRUE(tensorsAllClose(results[0], eager));
 }
 
+// [SiLU 一等节点] 单节点 SiLU 图应能真正编译执行，且与 eager silu 数值一致。
+// 验证执行层闭环：Graph SiLUNode → MLIRKernelGen 发射 c3.silu → SiLUOpLowering。
+TEST(JITCompile, SiLUGraphExecute) {
+    using namespace ct::c3;
+
+    Graph g;
+    auto desc = TensorDesc::fromShape({6});
+    size_t x = g.addInput(desc);
+    size_t z = g.addNode(SiLUNode{desc}, {x}, desc);
+    g.markOutput(z);
+
+    auto& engine = C3Engine::getInstance();
+    auto kernel = engine.compile(g, {});
+    ASSERT_NE(kernel, nullptr);
+
+    Tensor a(ShapeTag{}, {6});
+    fillTensor(a, {-2.0f, -1.0f, -0.5f, 0.0f, 0.5f, 2.0f});
+
+    auto results = kernel->execute({a});
+    ASSERT_EQ(results.size(), 1u);
+
+    Tensor eager = a.silu();
+    if (!tensorsAllClose(results[0], eager)) {
+        std::cout << "silu results: ";
+        for (size_t i = 0; i < 6; ++i) std::cout << results[0].data_read<float>()[i] << " ";
+        std::cout << "\nsilu eager:   ";
+        for (size_t i = 0; i < 6; ++i) std::cout << eager.data_read<float>()[i] << " ";
+        std::cout << "\n";
+    }
+    EXPECT_TRUE(tensorsAllClose(results[0], eager));
+}
+
 TEST(JITCompile, BroadcastAddGraphExecute) {
     using namespace ct::c3;
 
@@ -1695,6 +1727,44 @@ TEST(MLIRBackend, MatMulEpilogueBiasReLUMultiNode) {
     auto results = kernel->execute({A, B, Bias});
     ASSERT_EQ(results.size(), 1u);
     Tensor eager = (matMul(A, B) + Bias).relu();
+    EXPECT_TRUE(tensorsAllClose(results[0], eager));
+}
+
+// 多节点 epilogue 融合：MatMul → SiLU 合成一个 c3.matmul op（act=SiLU）
+// [立项 C] 验证 MatMulActivation::SiLU 的 lowering（buildSmallMatMul + vector/scalar 分支 act==4）。
+TEST(MLIRBackend, MatMulEpilogueSiLUMultiNode) {
+    using namespace ct::c3;
+
+    Graph g;
+    auto a_desc = TensorDesc::fromShape({2, 3});
+    auto b_desc = TensorDesc::fromShape({3, 4});
+    auto out_desc = TensorDesc::fromShape({2, 4});
+    size_t a = g.addInput(a_desc);
+    size_t b = g.addInput(b_desc);
+    size_t mm = g.addNode(MatMulNode{a_desc, b_desc}, {a, b}, out_desc);
+    size_t silu = g.addNode(SiLUNode{out_desc}, {mm}, out_desc);
+    g.markOutput(silu);
+
+    auto kernel = compileMLIR(g);
+    ASSERT_NE(kernel, nullptr);
+
+    Tensor A(ShapeTag{}, {2, 3});
+    Tensor B(ShapeTag{}, {3, 4});
+    fillTensor(A, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f});
+    fillTensor(B, {-1.0f, 0.0f, 1.0f, 2.0f,
+                    0.5f, -0.5f, 1.5f, -1.5f,
+                    2.0f, 1.0f, 0.0f, -2.0f});
+
+    auto results = kernel->execute({A, B});
+    ASSERT_EQ(results.size(), 1u);
+    Tensor eager = matMul(A, B).silu();
+    if (!tensorsAllClose(results[0], eager)) {
+        std::cout << "matmul+silu results: ";
+        for (size_t i = 0; i < 8; ++i) std::cout << results[0].data_read<float>()[i] << " ";
+        std::cout << "\nmatmul+silu eager:   ";
+        for (size_t i = 0; i < 8; ++i) std::cout << eager.data_read<float>()[i] << " ";
+        std::cout << "\n";
+    }
     EXPECT_TRUE(tensorsAllClose(results[0], eager));
 }
 
