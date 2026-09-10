@@ -44,6 +44,7 @@
 - §4.79 ADR-0002 方案 C 落地: region 合并策略化 + 规模保护(跨分量收益实测仅 0.12%)(STATUS 新)
 - §4.80 G3 集成点基础 partitionGraph + **EXP-2 实测推翻方案 C**(不合并快 3.5-4%)(STATUS 新)
 - §4.81 G3 数值正确性验证: 切分执行与整图内核**逐位一致**(max_abs_diff=0, 9/9); 修复测量工具"Const 被当普通输入填假数据"缺陷; 识别分隔符覆盖缺口(STATUS 新)
+- §4.82 G3 执行计划补全: `partitionGraph` 覆盖分隔符(SumReduce/Softmax/CrossEntropy/Fused 切出独立子图) + A/B 设施编排执行; FC-MIMO(有依赖) 4/4 逐位一致(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -53,7 +54,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → G3**: G1 数据齐(§4.76/4.77) + G2 影子(§4.78) + `partitionGraph` 切分(§4.80) + A/B 实测**时间侧+数值侧均已完成**(§4.80/§4.81: 不合并快 3.5-4%, 26-29/30; 数值逐位一致 max_abs_diff=0)。**EXP-2 实测推翻 ADR-0002 方案 C** → ① 默认维持 Strict(不推进 Allow) ② 收益模型须纳入"单内核代码膨胀成本"(方向同方案 B 的严格规模上限) ③ 补实验(小维度/FC-MIMO/拐点标定) ④ **G3 真接管前须先补 §4.81 的分隔符覆盖缺口**(SumReduce 等 LEAF 产出不被子图计划覆盖; Const 须物化供给) —— (HITL)。
+1. **通用图融合 → G3**: G1 数据齐(§4.76/4.77) + G2 影子(§4.78) + `partitionGraph` 切分 + A/B 实测**时间侧+数值侧均已完成**(§4.80/§4.81/§4.82: 不合并快 3.5-4%; 数值逐位一致 max_abs_diff=0, 含 FC-MIMO 有依赖切分 4/4)。**EXP-2 实测推翻 ADR-0002 方案 C** → ① 默认维持 Strict(不推进 Allow) ② 收益模型须纳入"单内核代码膨胀成本"(方向同方案 B 的严格规模上限) ③ 补实验(小维度/FC-MIMO/拐点标定; §4.82 已给 FC 反例: 该并不该拆) ④ G3 真接管(planner 判定参与执行决策) —— (HITL)。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
@@ -231,7 +232,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | C3 compile pipeline | `test_c3_compile_merged` `test_c3_compile_merged_pgo` | 10/11 断言 |
 | 反向 fusion/DEBT | `test_fused_bw_debt2` | fused BW 默认 off, sanity |
 | pgo/错误路径(已修绿) | `test_c3_pgo_deopt` `test_c3_compile_error` | bad_weak_ptr 已修 |
-| 泛化判据层 | `test_fusion_planner` | 26 断言(Default/RegionKernel/代价门/强制合并/ADR-0002 策略/partitionGraph 切分 + 子图边界契约(Const 外部输入 / 分隔符不覆盖) + SiLU 归类) |
+| 泛化判据层 | `test_fusion_planner` | 27 断言(Default/RegionKernel/代价门/强制合并/ADR-0002 策略/partitionGraph 切分 + 子图边界契约(Const 外部输入 / 分隔符切出 / 跨子图依赖) + SiLU 归类) |
 | forward 整图捕获 | `test_forward_capture` | 真实前向 capture+plan(含 MatMul+SiLU) |
 | deploy 指纹 O(1) 读 | `test_machine_fingerprint` | save/load/桥接/回退 |
 | forward 一致率采集 | `test_c3_mnist_train` + `C3_HOOK_CAPTURE=1` | MNIST fwd 3/3(off-path) |

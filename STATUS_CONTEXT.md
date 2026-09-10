@@ -2269,3 +2269,51 @@ machine_fingerprint 3 全绿; MNIST acc 97.1421% 基线不变(默认路径未受
 sum_mean_grad 18 / backward max_diff=0 全绿; MNIST acc 97.1421% / loss 0.0985 基线不变;
 FFN 默认路径无 `PARTITION-AB` 输出(off-path 零影响)。
 
+
+## 4.82 2026-09-10 G3 执行计划补全: partitionGraph 覆盖分隔符 + 编排执行数值验证
+
+承接 §4.81。§4.81 把"分隔符(SumReduce 等)不被子图覆盖"当成设计约束固化, 并记为
+"G3 真接管前须补的缺口"。本轮纠正这个**方向性判断**: 对一个执行计划而言, 漏掉
+bias 梯度这类活值输出是**正确性缺陷**, 不是可接受的约束。
+
+**根因再审视**
+- `FusionUnitKind::LEAF` 的注释本就写"结构性节点自身一个 kernel"——设计意图是
+  分隔符要独立成内核。上一轮 `partitionGraph` 里"跳过 LEAF"是偏离意图的简化。
+- 分隔符有两类, 须区分:
+  - Const(含图输入占位、图内常量): 物化边界, 不切, 仅作外部输入(驱动方喂数据/常量)
+  - SumReduce/Softmax/CrossEntropy/Fused: 真实计算, 必须切出独立子图
+
+**实现(off-path, 函数签名不变, 只多切子图)**
+1. `partitionGraph`: LEAF 单节点若为 Const 则跳过, 否则切出单节点子图。
+   覆盖性从"仅 compute 节点"提升为"全部需执行节点"(compute + 计算型分隔符)。
+2. 依赖检测改为**两遍式**: 先切全部子图并建 `node_sub_of`, 再统一查 upstream。
+   消除"被消费的分隔符在 units 里排于消费者之后 → 边切边检漏检依赖"的隐患。
+
+**契约测试反转(test_fusion_planner 26→27)**
+- 删除 `PartitionDoesNotCoverRegionSeparatorOutput`(它固化的恰是缺陷)
+- 新增 `PartitionCoversRegionSeparatorAsSubGraph`: 分隔符必须被切出且标记为输出
+- 新增 `PartitionRecordsDependencyOnConsumedSeparator`: 被 compute 消费的分隔符,
+  其 upstream 依赖被正确记录(验证两遍式检测)
+
+**A/B 设施增强: 编排执行(闭合"有依赖切分"的数值验证空白)**
+- §4.81 的 A/B 数值对比只支持无依赖子图, 对有依赖图直接跳过 → FC-MIMO 从未被数值验证
+- 新增拓扑排序 + 编排执行: 上游子图输出喂给下游输入, 得到每个原图输出节点的 tensor
+- 抽 `fakeInputForOrig(oid)`: 图输入→伪随机 / Const→真实常量; 简化 `fakeInputs`
+
+**数值结果(非均匀确定性输入, 逐位一致)**
+| 路径 | 切分 | 依赖 | 数值对比 |
+|---|---|---|---|
+| FFN-MIMO | region(21)+region(2) | 无 | 9/9, max_abs_diff=0 |
+| FC-MIMO | region(6)+SumReduce(1) | sub1←sub0 | **4/4, max_abs_diff=0**(编排执行) |
+
+=> "有依赖切分"与"无依赖切分"均逐位一致。
+
+**性能侧新观察(供 HITL ③ 补实验参考)**
+- FC-MIMO: B(2内核) 比 A(1内核) 慢约 6%(B_wins 2/30)——region 小, 把 SumReduce
+  独立成内核只增 launch 开销、无收益。
+- 与 FFN 相反(B 快 3.5-4%)。再次印证 ADR-0002: 融合与否须按代价判定, 不能一刀切。
+  FC 该并(单内核含 SumReduce), FFN 该拆(多内核)。这正是 G3"按 planner 判定"的价值。
+
+**回归**: fusion_planner 27 / graph 117 / backward max_diff=0 / forward_capture 4 /
+machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST acc 97.1421% / loss 0.0985 基线不变;
+FFN 默认路径无 `PARTITION-AB` 输出(off-path 零影响)。

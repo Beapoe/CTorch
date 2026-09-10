@@ -637,8 +637,9 @@ TEST(FusionPlanner, PartitionExposesConstAsExternalInputToDriver) {
     EXPECT_TRUE(found);
 }
 
-// 契约 2: SumReduce 是分隔符, 不进入任何子图; 其产出因此不被子图执行计划覆盖。
-TEST(FusionPlanner, PartitionDoesNotCoverRegionSeparatorOutput) {
+// 契约 2: SumReduce 是真实计算型分隔符, 必须被切出为独立子图(自身一个 kernel),
+// 否则执行计划漏掉其产出(正确性缺陷)。与 LEAF 的"自身一个 kernel"语义对齐。
+TEST(FusionPlanner, PartitionCoversRegionSeparatorAsSubGraph) {
     Graph g;
     auto dg = TensorDesc::fromShape({2, 4});
     auto dr = TensorDesc::fromShape({4});
@@ -650,11 +651,52 @@ TEST(FusionPlanner, PartitionDoesNotCoverRegionSeparatorOutput) {
     FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel);
     std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
 
-    // 分隔符节点不得出现在任何子图的覆盖集合内
-    for (const auto& s : subs)
-        for (size_t nid : s.unit_node_ids) EXPECT_NE(nid, reduced);
+    // 分隔符节点必须恰好被某个子图覆盖(此处全图只有它一个可执行节点 → 恰 1 个子图)
+    ASSERT_EQ(subs.size(), 1u);
+    EXPECT_EQ(subs[0].unit_node_ids.size(), 1u);
+    EXPECT_EQ(subs[0].unit_node_ids[0], reduced);
 
-    // 该输出也不应由任何子图声称(驱动方需另行处理 → 见 runPartitionABTest 的 missing 计数)
-    for (const auto& s : subs)
-        for (size_t oid : s.output_orig_ids) EXPECT_NE(oid, reduced);
+    // 该子图必须把分隔符标记为输出(其产出可被驱动方取回)
+    ASSERT_EQ(subs[0].output_orig_ids.size(), 1u);
+    EXPECT_EQ(subs[0].output_orig_ids[0], reduced);
+
+    // 其输入是图输入占位(grad), 无跨子图依赖
+    EXPECT_TRUE(subs[0].upstream_units.empty());
+}
+
+// 契约 3: 被 compute 子图消费的分隔符(跨子图依赖)必须正确记录 upstream。
+// 验证两遍式依赖检测不会漏掉"被消费的分隔符晚于消费者切出"的场景。
+TEST(FusionPlanner, PartitionRecordsDependencyOnConsumedSeparator) {
+    Graph g;
+    auto d4 = TensorDesc::fromShape({4});
+    size_t x = g.addInput(d4);
+    // s = Softmax(x): region 分隔符, 被下游 compute 节点消费
+    size_t s = g.addNode(SoftmaxNode{d4}, {x}, d4);
+    // y = Mul(s, x): compute 节点, 消费分隔符 s 的输出
+    size_t y = g.addNode(MulNode{d4, d4}, {s, x}, d4);
+    g.markOutput(y);
+    g.markOutput(s);
+
+    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel);
+    std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
+
+    // 应有 2 个子图: Softmax(分隔符) + Mul(compute)
+    ASSERT_EQ(subs.size(), 2u);
+
+    size_t softmax_sub = SIZE_MAX, mul_sub = SIZE_MAX;
+    for (size_t k = 0; k < subs.size(); ++k) {
+        for (size_t nid : subs[k].unit_node_ids) {
+            if (nid == s) softmax_sub = k;
+            if (nid == y) mul_sub = k;
+        }
+    }
+    ASSERT_NE(softmax_sub, SIZE_MAX);
+    ASSERT_NE(mul_sub, SIZE_MAX);
+    EXPECT_NE(softmax_sub, mul_sub);
+
+    // Mul 子图的 upstream 必须包含 Softmax 子图
+    bool dep = false;
+    for (size_t up : subs[mul_sub].upstream_units)
+        if (up == softmax_sub) dep = true;
+    EXPECT_TRUE(dep);
 }
