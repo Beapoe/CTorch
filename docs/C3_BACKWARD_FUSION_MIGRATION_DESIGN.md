@@ -93,7 +93,26 @@ region_metric[comp=2 reload=512KB launch=400KB ws=134MB merged=0]   # LLaMA-1B �
 **待补(登记的后续项)**: 代价判定需重新设计收益模型——当前
 `saved_reload`(省外部输入重读) 低估了 MIMO 的真实收益(应为"省中间量物化");
 但直接改成内联中间量会让 `saved ≥ ws` 恒真、判据退化为"总是合并",
-需配独立第二约束(缓冲压力/region 节点数上限)。此项在强制合并跑通后单独立项。
+需配独立第二约束(缓冲压力/region 节点数上限)。
+
+### 4.2.1 代价门重设计: ADR-0002 方案 C (已落地 2026-09-10)
+
+§4.2 的后续项已由 ADR-0002 决策并落地(见 `work/reports/2026-09-10/adr-0002-*.md`)。
+
+**关键实验(EXP-1)**: 跨分量合并的收益 = 省重读 128KB(5.33µs) + 省 1 次 launch(0.49µs)
+= **5.81µs**, 相对 FFN bwd 单步 4900µs 仅 **0.119%**。
+→ 该层判别力价值不成比例; 无论判并或不并, 性能差异 < 0.2%。
+
+**决策(方案 C)**: 跨分量**默认合并**, 判别力**下沉到"规模保护"**(防单内核代码膨胀/寄存器压力)。
+- 替代方案 A(修正收益模型) 会因 `saved ≥ ws` 恒真而退化; 方案 B(ws 语义重分配) 缺"容量上限"依据。
+- 实现: `RegionMergeStrategy{Strict, Allow}` + `RegionFusionPolicy::merge_strategy`(默认 Strict)
+  + `max_region_nodes`(默认 64) + env `C3_REGION_MERGE_ALLOW=1`。
+- 判定优先级: `force_merge` > `Allow`(结构 + 规模保护) > `Strict`(现行门槛)。
+
+**实测**: Strict(默认) `reconciled=0`(与改动前逐位一致); Allow `reconciled=1`(与 MIMO 一致)。
+
+**仍待做(ADR 步 3-5)**: ① G3 集成点(planner 判定参与执行, 带开关) ② A/B 实测(1 内核 vs 2 内核,
+方案 C 最终依据) ③ `max_region_nodes` 实测标定。
 
 ## 5. 风险 / 边界 / 红线
 

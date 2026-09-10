@@ -417,6 +417,48 @@ TEST(FusionPlanner, ForceMergeStillRequiresSharedExternal) {
     EXPECT_NE(up, ur);
 }
 
+// ======================= ADR-0002 方案 C：跨分量默认合并 =======================
+
+// Allow 策略：即使相对收益门槛不达标，也默认跨分量合并（判别力已下沉到规模保护）
+TEST(FusionPlanner, AllowStrategyMergesByDefault) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    RegionFusionPolicy policy;
+    policy.min_benefit_ratio = 1.0;   // Strict 口径下明确不划算
+    policy.launch_unit_bytes = 0;
+    policy.merge_strategy = RegionMergeStrategy::Allow;
+    policy.max_region_nodes = 64;     // 宽松规模上限
+
+    FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_TRUE(region.region_metric.merged);
+    EXPECT_EQ(region.compute_unit_count, 1u);
+    EXPECT_EQ(region.region_metric.region_node_count, 3u);
+}
+
+// Allow 策略：规模保护上限生效时仍不合并（方案 C 保留的唯一判别力）
+TEST(FusionPlanner, AllowStrategyRespectsScaleGuard) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    RegionFusionPolicy policy;
+    policy.merge_strategy = RegionMergeStrategy::Allow;
+    policy.max_region_nodes = 2;      // 3 个 regionable 节点 > 2 → 触发规模保护
+
+    FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_FALSE(region.region_metric.merged);
+    EXPECT_EQ(region.compute_unit_count, 2u);
+}
+
+// 默认策略必须是 Strict：行为与 ADR-0002 之前完全一致（回归保护）
+TEST(FusionPlanner, DefaultStrategyIsStrictUnchanged) {
+    SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
+    RegionFusionPolicy policy;        // 默认构造
+    EXPECT_EQ(policy.merge_strategy, RegionMergeStrategy::Strict);
+    policy.min_benefit_ratio = 1.0;   // 收益不足
+    policy.launch_unit_bytes = 0;
+
+    FusionPlan region = FusionPlanner::planUnits(sg.g, FusionStrategy::RegionKernel, policy);
+    EXPECT_FALSE(region.region_metric.merged);   // Strict 下不合并(既有行为)
+    EXPECT_EQ(region.compute_unit_count, 2u);
+}
+
 TEST(FusionPlanner, RegionKernelCostMergeWorthy) {
     SharedExternalGraph sg = buildTwoChainsSharedExternal(1000);
     RegionFusionPolicy policy;

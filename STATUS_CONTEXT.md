@@ -2131,3 +2131,41 @@ planner 判定只用于观测与告警。
 
 **验证**: graph 117 / backward max_diff=0 / swiglu 全过 / fusion_planner 17 /
 forward_capture 4 全绿; MNIST acc 97.1421% 基线不变。
+
+## 4.79 2026-09-10 ADR-0002 方案 C 落地: region 合并策略化 + 规模保护(G3 前置第一步)
+
+承接 §4.78。G3 唯一硬阻塞是"代价门判定与 MIMO 不符"。本轮先做**关键调研**, 结果
+改变了方案走向, 再按 ADR-0002 方案 C 落地。
+
+**关键实验(ADR-0002 EXP-1): 跨分量合并收益的真实量级**
+- FFN 128x1024x2048: 省重读 131072 B(5.33µs) + 省 launch 1 次(0.49µs) = **5.81 µs**
+- FFN bwd 单步 4900 µs → **收益占比 0.119%**
+- region 划分构成: `region[n=21] + region[n=2]`(planner) vs MIMO 全并
+=> **结论: 跨分量合并的收益是 0.1% 量级**; 无论代价门判并或不并, 性能差异 < 0.2%。
+   这与 §4.69"MIMO 收益在大分量内部、非跨分量"一致。该层判别力价值不成比例。
+
+**决策(ADR-0002, 方案 C)**: 承认该层判别力价值低 → 跨分量**默认合并**,
+把判别力**下沉到"region 规模保护"**(防单内核代码膨胀/寄存器压力)。方案 A(修正收益模型)
+会让 `saved >= ws` 恒真而退化为"总是合并"; 方案 B(ws 语义重分配)缺"容量上限"依据。
+ADR 落档: work/reports/2026-09-10/adr-0002-region-cost-gate-redesign.md
+
+**改动**
+- FusionPlanner.h: 新增 `RegionMergeStrategy{Strict, Allow}`; `RegionFusionPolicy` 加
+  `merge_strategy`(默认 Strict) 与 `max_region_nodes`(默认 64); `RegionMergeMetric` 加
+  `region_node_count`。
+- FusionPlanner.cpp: 判定优先级 `force_merge` > `Allow`(结构 + 规模保护) > `Strict`(现行门槛);
+  `fromMachineDefaults()` 读取新开关。
+- C3Config: 新增 `C3_REGION_MERGE_ALLOW=1`(regionMergeAllowEnabled, 默认关闭)。
+
+**验证**
+| 场景 | merged | planner_wants | reconciled |
+|---|---|---|---|
+| FFN 大维度 · Strict(默认) | 0 | 2 | 0 (**与改动前逐位一致**) |
+| FFN 大维度 · Allow(方案 C) | 1 | 1 | **1(与 MIMO 一致)** |
+
+- test_fusion_planner 17→**20** 断言(Allow 默认合并 / 规模保护生效 / 默认 Strict 回归保护)。
+- 全量回归: graph 117 / backward max_diff=0 / swiglu / forward_capture 4 /
+  machine_fingerprint 3 / **MNIST acc 97.1421%(基线不变)**。
+
+**待办(ADR 步 3-5, G3 后续)**: 需"planner 判定参与执行"的集成点(与 G3 集成合并推进) →
+才能做 1 内核 vs 2 内核的 A/B 实测(方案 C 的最终依据); `max_region_nodes=64` 需实测标定。
