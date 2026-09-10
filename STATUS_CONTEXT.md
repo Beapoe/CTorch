@@ -2391,3 +2391,39 @@ G3 接管的实际收益可能主要来自"买扩展性"(新结构自动适配),
 
 **回归**: fusion_planner 27 / graph 118(+OrchestratedKernel) / backward max_diff=0 /
 forward_capture 4 / machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST 97.1421% 基线不变。
+
+## 4.85 2026-09-10 修复 fuse 融合的 rhs 标量广播越界读(§4.84 P2 闭环)
+
+承接 §4.84 发现的 P2 bug。本轮定位根因并修复。
+
+**根因(精确定位)**
+- 现象: `Mul(s[4],c[4]) -> Add(y[4], one[1])` 图, 编译后输出 `[4,4,5,6]`
+  (应为 `[4,5,6,7]`), 且 `outShape()=null`。
+- 二分定位:
+  - 单独 `Add(y[4], one[1])` → **正确** `[4,5,6,7]`(走多节点路径的
+    `getBroadcastMod`, 第 1563 行 `rhs_numel==1 → RHS scalar broadcast`)。
+  - `Mul -> Add`(会被 `Graph::fuse()` 融合成 FusedNode) → **错误** `[4,4,5,6]`。
+- 进一步: `C3_MLIR_NO_VECTORIZE=1`(强制标量 fused 路径)仍错 → 非向量化路径特有问题。
+- 根因: `Graph::fuse()` 把含 **rhs 标量广播** 的链融合为 `FusedNode` 后,
+  `buildFusedMultiNode` / `buildFusedMultiNodeVectorized` 对标量 arg 的加载越界读
+  ——标量(numel=1)被当长度 n 的数组读, `idx>=1` 读到邻接内存(恰为 0),
+  故 `[3+1, 4+0, 5+0, 6+0] = [4,4,5,6]`。
+- 为何整图正确: 图内 `Const` 节点走不同路径(不进入该 fused arg 加载);
+  而 `partitionGraph` 切分后 `Const` 变 INPUT 占位, 暴露该 bug。
+
+**修复(最小侵入, 精确不误伤)**
+- `Graph.cpp` `fuse()`: 融合链构建后增加检查——链内任一二元 op(Add/Sub/Mul/Div)
+  若 **rhs numel==1 且 lhs numel>1**(rhs 标量广播), 则**放弃该链的融合**,
+  节点保持独立, 走多节点 `getBroadcastMod` 路径(正确处理 rhs 标量广播)。
+- **lhs 标量广播不受影响**: 如 FFN 的 `Add(Const[1], Exp[128,2048])`(lhs 标量),
+  不满足 `rhs_n==1 && lhs_n>1`, 仍照常融合; 其正确性由 FFN 5-step loss 逐位一致证实。
+
+**验证(逐位一致)**
+| 验证项 | 结果 |
+|---|---|
+| `Mul+Add`(rhs 标量) 编译执行 | `[4,5,6,7]` 正确(修复前 `[4,4,5,6]`); outShape 4(修复前 null) |
+| OrchestratedKernel 单测(恢复广播版本: separator+跨子图依赖+Const物化+rhs标量) | PASS |
+| FFN 5-step loss 序列 | 与修复前**逐位相同**(5.8210/14533136/131903728/55509092/28272042) |
+| MNIST acc / loss | 97.1421% / 0.0985 基线不变 |
+| G3 接管(FFN+FC) | loss/acc 与默认一致, 编排内核正常接管 |
+| 回归 | fusion_planner 27 / graph 118 / backward / forward_capture / fingerprint 3 / sum_mean_grad 18 全绿 |

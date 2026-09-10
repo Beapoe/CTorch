@@ -1523,16 +1523,18 @@ TEST(MLIRBackend, TransposeSumReduceAxis1MultiNode) {
 TEST(MLIRBackend, OrchestratedKernelMatchesWholeGraph) {
     using namespace ct::c3;
 
-    // 图: x[2,4] -> SumReduce(axis=0)[4] -> Mul(s,c)[4] (无广播, 聚焦编排逻辑)
-    // 覆盖: separator(SumReduce) 独立切出 + 跨子图依赖(Mul 消费 SumReduce 输出)。
+    // 图: x[2,4] -> SumReduce(axis=0)[4] -> Mul(s,c)[4] -> Add(y, one)[4]
     Graph g;
     auto x_desc = TensorDesc::fromShape({2, 4});
     auto v4 = TensorDesc::fromShape({4});
+    auto one_desc = TensorDesc::fromShape({1});
     size_t x = g.addInput(x_desc);
     size_t c = g.addInput(v4);
+    size_t one = g.addConstant(1.0, one_desc);                 // Const 标量(需物化)
     size_t s = g.addNode(SumReduceNode{x_desc, 0}, {x}, v4);   // separator
     size_t y = g.addNode(MulNode{v4, v4}, {s, c}, v4);         // 依赖 s
-    g.markOutput(y);
+    size_t z = g.addNode(AddNode{v4, one_desc}, {y, one}, v4); // 依赖 Const one(rhs 标量广播)
+    g.markOutput(z);
 
     // 整图内核
     auto whole = compileMLIR(g);

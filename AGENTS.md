@@ -47,6 +47,7 @@
 - §4.82 G3 执行计划补全: `partitionGraph` 覆盖分隔符(SumReduce/Softmax/CrossEntropy/Fused 切出独立子图) + A/B 设施编排执行; FC-MIMO(有依赖) 4/4 逐位一致(STATUS 新)
 - §4.83 拐点标定: Strict 判据全维度判对(6 维度, 拐点精确吻合) → **收益模型无需重设计(撤销待办②)**(STATUS 新)
 - §4.84 G3 真接管落地: OrchestratedKernel 编排执行 + `C3_G3_TAKEOVER=1`(默认关=整图); FFN 5-step loss 逐位一致; 发现 MLIR rhs 标量广播 shape 推断 bug(P2)(STATUS 新)
+- §4.85 修复 fuse 融合的 rhs 标量广播越界读: `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs); FFN/MNIST 数值逐位不变(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -56,7 +57,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → G3**: ① 默认维持 Strict ✅ ② ~~收益模型重设计~~ **撤销**(§4.83) ③ 补实验**完成**(§4.83) ④ **G3 真接管落地**(§4.84: OrchestratedKernel + `C3_G3_TAKEOVER=1`, 默认关, FFN 5-step loss 逐位一致)。**剩余**: ① 常态开影子累积证据 ② 决定是否默认开启接管(需权衡 FFN 收益 vs FC 慢 6% + 真实收益被稀释) ③ 修 MLIR rhs 标量广播 bug(P2) —— (HITL)。
+1. **通用图融合 → G3**: ① 默认维持 Strict ✅ ② ~~收益模型重设计~~ **撤销**(§4.83) ③ 补实验**完成**(§4.83) ④ **G3 真接管落地**(§4.84) ⑤ ~~修 MLIR rhs 标量广播 bug~~ **已修**(§4.85)。**剩余**: ① 常态开影子累积证据 ② 决定是否默认开启接管(需权衡 FFN 收益 vs FC 慢 6% + 真实收益被稀释) —— (HITL)。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
@@ -171,7 +172,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
 | **P2** | 泛化融合已进 G3 接管(带开关) | planner 判定已可参与执行(`C3_G3_TAKEOVER=1`, §4.84); 默认仍走手写 MIMO | 常态开影子累积证据; 是否默认开启接管需 HITL 权衡(FFN 收益 vs FC 慢 6% + 真实收益被稀释) |
-| **P2** | MLIR rhs 标量广播 shape 推断 bug(§4.84 新发现) | `Add([N],[1])`(标量 [1] 作 rhs 普通输入)输出 shape 错判为 [1]; 整图因 Const 折叠正确, partitionGraph 切分后 Const 变 INPUT 暴露 | 独立立项修复广播 shape 推断 + 加回归; FFN/FC 的标量 Const(1) 均为 lhs, 暂不受影响 |
+| ~~P2~~ | ~~MLIR rhs 标量广播 shape 推断 bug~~ | ✅ 已修(§4.85): 根因是 `fuse()` 融合含 rhs 标量广播的链后, fused 路径对标量 arg 越界读; 修复为 `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs) | 已闭环; FFN/MNIST 数值逐位不变 |
 | **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
 
 ## Cross-Project Memory (Agent lessons, 跨项目适用)
