@@ -2100,3 +2100,34 @@ forward_capture 4 全绿; MNIST acc 97.1421% 与基线一致(默认路径未受�
 
 **验证**: graph 117 / backward max_diff=0 / swiglu 全过 / fusion_planner 17 /
 forward_capture 4 全绿; MNIST acc 97.1421% 基线不变。
+
+## 4.78 2026-09-10 G2 影子观测落地: planner 静默对拍 + 仅不一致告警(绝不改行为)
+
+承接 §4.76/§4.77。G1 数据已齐后, 按迁移决策门设计推进到 **G2(影子)**:
+让 planner 判定进入**常态化观测**, 但不参与任何决策——为 G3(真接管) 累积
+"planner 会错/不会错"的证据。
+
+**改动**
+- C3Config: 新增 `C3_PLANNER_SHADOW=1` 开关(plannerShadowEnabled(), 默认关闭)。
+- C3BackwardCapture::diagnosePlannerReconcile 重构为**双模式**(均 env 门控, 默认零开销):
+  | env | 模式 | 行为 |
+  |---|---|---|
+  | (无) | 关闭 | 首行早退, 零开销 |
+  | `C3_PLANNER_DIAG=1` | 详细诊断 | 分区明细 + 代价门度量 + BW-RECONCILE + G1-RATIO(行为同 §4.76/4.77) |
+  | `C3_PLANNER_SHADOW=1` | **G2 影子** | **静默一致**, 仅不一致时输出 `[G2-SHADOW-MISMATCH]` |
+  两模式可共存。影子模式只跑 region 策略 planner(比 DIAG 省一次 default 分区)。
+- 告警行含: label / graph_nodes / mimo_kernels / planner_wants / force / 累计一致率,
+  并显式标注"仍走 MIMO, 不改行为"。
+
+**关键边界**: G2 影子**不改变任何执行路径**——真实执行仍走 MIMO 手写目录;
+planner 判定只用于观测与告警。
+
+**实测**
+- 默认无 env: 四类诊断标签输出 **0 条**(零开销)。
+- `SHADOW` + MNIST(FC-MIMO, 判定一致): `[G2-SHADOW]` 输出 **0 条**(静默一致)。
+- `SHADOW` + FFN 大维度(判定不一致): 输出 1 条
+  `[G2-SHADOW-MISMATCH] label=FFN-MIMO graph_nodes=34 mimo_kernels=1 planner_wants=2 force=0 cum=0/1`。
+- `DIAG`: 行为与 §4.76/4.77 一致(PLANNER-DIAG/BW-RECONCILE/G1-RATIO 各 1 条, 且不误报 G2)。
+
+**验证**: graph 117 / backward max_diff=0 / swiglu 全过 / fusion_planner 17 /
+forward_capture 4 全绿; MNIST acc 97.1421% 基线不变。

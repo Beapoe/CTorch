@@ -26,7 +26,7 @@
 | **SiLU 提升为 c3 Graph 一等节点** | ✅ A+B | Graph SiLUNode + ForwardCapture/FusionPlanner 归类 + 执行层可编译(nodeVariantToOp/MLIR 发射/SiLUOpLowering); FFN forward 一致率可采 (STATUS §4.73) |
 | **hotpath SiLU 缺失修复(立项 C)** | ✅ 已修 | makeNodeVariant/isSupportedOp/isUnaryOp + MatMulActivation + epilogue lowering(act=4); MatMul+SiLU 融合数值正确 (STATUS §4.74) |
 | **region 强制合并(C3_FORCE_REGION_MERGE)** | ✅ 新增 | 解耦"结构是否正确"与"是否划算": 强制跳过代价门; FFN 4 维度 reconciled 全转 1; 默认行为不变 (STATUS §4.75) |
-| 迁移决策门 G0-G3 | 🟡 G1 数据已齐 | 两路径结构等价性 100%(§4.76) + 稳态统计(跨结构聚合一致率, §4.77); 代价判定待重设计(新立项) |
+| 迁移决策门 G0-G3 | 🟢 **G2 影子已就绪** | G1 数据齐(§4.76/4.77) + G2 影子观测落地(§4.78: `C3_PLANNER_SHADOW=1` 静默对拍/仅不一致告警/绝不改行为); 代价判定重设计待立项 |
 
 **最近变更速览** (详细日志见 `STATUS_CONTEXT.md` §4.53-4.71 + git log):
 - §4.53 MatMul epilogue 向量化; §4.54 DEBT-2 降级 + MNIST 画像
@@ -40,6 +40,7 @@
 - §4.75 region 强制合并解耦结构/代价(STATUS 新); launch 税校准前置被证伪
 - §4.76 G1 覆盖补齐: FC-MIMO 挂 reconcile + 一致率矩阵采全(两条路径结构侧 100%)(STATUS 新)
 - §4.77 G1 一致率升级为稳态统计(跨结构聚合, 供 G2 决策; 默认路径零开销)(STATUS 新)
+- §4.78 G2 影子观测落地: planner 静默对拍 + 仅不一致告警(绝不改行为)(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -49,7 +50,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → 进 G2**: G1 **数据已齐**——覆盖率(§4.76 两路径挂 reconcile) + 结构等价性(100%) + 稳态统计(§4.77 跨结构聚合一致率, `[G1-RATIO]`/`[*-G1-STAT]`)。剩余: ① 代价判定收益模型重设计(见已知未解决 P2, 新立项); ② 是否进 G2(影子接管) —— (HITL) 决策点。
+1. **通用图融合 → 已进 G2(影子)** ✅: G1 数据齐(§4.76 覆盖 + §4.77 稳态统计) + **G2 影子观测落地**(§4.78: `C3_PLANNER_SHADOW=1` 静默对拍/仅不一致告警/绝不改行为)。剩余: ① 常态开影子累积证据(建议) ② 代价判定收益模型重设计(G3 前置, 新立项) ③ 进 G3 真接管 —— (HITL) 决策点。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
@@ -119,7 +120,8 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 - `C3_DISABLE_SINGLE_KERNEL=1` 关闭单 kernel 编译触发
 - `C3_ENABLE_BACKWARD=0` 关 C3 backward(走 eager; 注意 forward 仍可能走 C3 单 kernel, 非纯 eager 对照)
 - `C3_HOOK_CAPTURE=1` 真实训练 forward 整图旁路采集(MNIST/FFN 一致率, off-path)
-- `C3_PLANNER_DIAG=1` 真实 fused_graph 上 planner 分区 + BW-RECONCILE(off-path)
+- `C3_PLANNER_DIAG=1` 真实 fused_graph 上 planner 分区 + BW-RECONCILE(off-path, 详细诊断)
+- `C3_PLANNER_SHADOW=1` **G2 影子观测**: planner 静默对拍, 仅不一致时告警 `[G2-SHADOW-MISMATCH]`; 绝不改行为
 - `C3_FORCE_REGION_MERGE=1` 强制 region 跨分量合并(跳过代价门, 只验结构等价性; 代价判定后补)
 - `C3_FINGERPRINT=<path>` 覆盖机器指纹配置路径(默认 ./c3.fingerprint); 由 `c3ctl calibrate` 生成
 - `c3ctl calibrate --label <m>` 部署时跑机器探针写指纹; `c3ctl show` 用运行时 O(1) 读回
@@ -159,7 +161,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | ~~P1~~ | ~~hotpath SiLU 缺失~~ | ✅ 已修(立项 C, STATUS §4.74): makeNodeVariant/isSupportedOp/isUnaryOp/MatMulActivation + epilogue lowering 全补齐 | 残留仅"无 bias FFN fused_hit=0"这一既有 P1, 与 SiLU 正确性无关 |
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
-| **P2** | 泛化融合判据/捕获/校准全 off-path, 未接管运行时 | planner 是旁路分析器; checkPattern/MIMO 仍手写; 未进 G2(需一致率+决策门) | 收 forward/FFN 一致率 → 进 G2; 触碰训练核心前过决策门 |
+| **P2** | 泛化融合仍处影子阶段, 未接管运行时 | planner 为旁路分析器(已进 G2 影子, §4.78); checkPattern/MIMO 仍手写; 未进 G3 真接管 | 常态开影子累积证据 + 代价判定重设计 → 进 G3; 触碰训练核心前过决策门 |
 | **P2** | region 代价判定收益模型待重设计 | 现 `saved_reload`(省外部输入重读)低估 MIMO 真实收益(应为"省中间量物化"); 但直接改会让 saved>=ws 恒真、判据退化为"总是合并" | 需配独立第二约束(缓冲压力/region 节点数上限); 强制合并已先解耦, 此项新立项 |
 
 ## Cross-Project Memory (Agent lessons, 跨项目适用)
