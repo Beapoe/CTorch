@@ -609,6 +609,12 @@ int main() {
                     (unsigned long long)mn.setup_us,
                     (unsigned long long)mn.func_us,
                     (unsigned long long)mn.calls);
+            // [G1 稳态统计] planner vs MIMO 对拍聚合一致率(仅 C3_PLANNER_DIAG=1 时非零)
+            if (bw.reconcile_total > 0) {
+                fprintf(stderr, "[C3-G1-STAT] epoch=%d reconcile=%zu/%zu (%.1f%%)\n",
+                        epoch + 1, bw.reconcile_matched, bw.reconcile_total,
+                        100.0 * (double)bw.reconcile_matched / (double)bw.reconcile_total);
+            }
         }
 #endif
 #ifdef CT_PROFILE_PERF

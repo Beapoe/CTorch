@@ -252,6 +252,12 @@ int main(int argc, char** argv) {
         fprintf(stderr, "[FFN-BW-STAT] bw_hit=%zu bw_miss=%zu fusion_hit=%zu mimo_hit=%zu mimo_miss=%zu mimo_exec_us=%llu\n",
                 bw.cache_hit_count, bw.cache_miss_count, bw.fusion_hit_count, bw.mimo_hit_count,
                 bw.mimo_miss_count, (unsigned long long)bw.mimo_exec_us);
+        // [G1 稳态统计] planner vs MIMO 对拍聚合一致率(仅 C3_PLANNER_DIAG=1 时非零)
+        if (bw.reconcile_total > 0) {
+            fprintf(stderr, "[FFN-G1-STAT] reconcile=%zu/%zu (%.1f%%)\n",
+                    bw.reconcile_matched, bw.reconcile_total,
+                    100.0 * (double)bw.reconcile_matched / (double)bw.reconcile_total);
+        }
     }
 #endif
     report_cblas_probe();

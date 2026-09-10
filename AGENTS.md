@@ -26,7 +26,7 @@
 | **SiLU 提升为 c3 Graph 一等节点** | ✅ A+B | Graph SiLUNode + ForwardCapture/FusionPlanner 归类 + 执行层可编译(nodeVariantToOp/MLIR 发射/SiLUOpLowering); FFN forward 一致率可采 (STATUS §4.73) |
 | **hotpath SiLU 缺失修复(立项 C)** | ✅ 已修 | makeNodeVariant/isSupportedOp/isUnaryOp + MatMulActivation + epilogue lowering(act=4); MatMul+SiLU 融合数值正确 (STATUS §4.74) |
 | **region 强制合并(C3_FORCE_REGION_MERGE)** | ✅ 新增 | 解耦"结构是否正确"与"是否划算": 强制跳过代价门; FFN 4 维度 reconciled 全转 1; 默认行为不变 (STATUS §4.75) |
-| 迁移决策门 G0-G3 | 🟡 G1 结构侧覆盖已齐 | FC-MIMO + FFN-MIMO 两路径结构等价性 100%(强制模式); 代价判定待重设计(新立项) (STATUS §4.76) |
+| 迁移决策门 G0-G3 | 🟡 G1 数据已齐 | 两路径结构等价性 100%(§4.76) + 稳态统计(跨结构聚合一致率, §4.77); 代价判定待重设计(新立项) |
 
 **最近变更速览** (详细日志见 `STATUS_CONTEXT.md` §4.53-4.71 + git log):
 - §4.53 MatMul epilogue 向量化; §4.54 DEBT-2 降级 + MNIST 画像
@@ -39,6 +39,7 @@
 - §4.74 立项 C: 修 hotpath SiLU 缺失(STATUS 新); MatMul+SiLU 融合数值正确
 - §4.75 region 强制合并解耦结构/代价(STATUS 新); launch 税校准前置被证伪
 - §4.76 G1 覆盖补齐: FC-MIMO 挂 reconcile + 一致率矩阵采全(两条路径结构侧 100%)(STATUS 新)
+- §4.77 G1 一致率升级为稳态统计(跨结构聚合, 供 G2 决策; 默认路径零开销)(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -48,7 +49,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → 进 G2**: SiLU 一等节点(§4.73) + region 强制合并(§4.75) + **G1 覆盖已齐**(§4.76: FC-MIMO 挂 reconcile, 两路径结构等价性 100%)。剩余: ① 代价判定收益模型重设计(见已知未解决 P2, 新立项); ② 据结果决定是否进 G2(影子接管, HITL 决策点)。
+1. **通用图融合 → 进 G2**: G1 **数据已齐**——覆盖率(§4.76 两路径挂 reconcile) + 结构等价性(100%) + 稳态统计(§4.77 跨结构聚合一致率, `[G1-RATIO]`/`[*-G1-STAT]`)。剩余: ① 代价判定收益模型重设计(见已知未解决 P2, 新立项); ② 是否进 G2(影子接管) —— (HITL) 决策点。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。

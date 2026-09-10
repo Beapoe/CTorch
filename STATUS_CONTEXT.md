@@ -2075,3 +2075,28 @@ FFN-MIMO 大维度需强制模式绕过代价门(§4.75)。→ **G1 结构侧覆
 
 **验证**: test_c3_graph 117 / backward max_diff=0 / swiglu 全过 / fusion_planner 17 /
 forward_capture 4 全绿; MNIST acc 97.1421% 与基线一致(默认路径未受影响)。
+
+## 4.77 2026-09-10 G1 一致率升级为稳态统计(跨结构聚合, 供 G2 决策)
+
+承接 §4.76。此前 G1 一致率是"单次采样"(每次诊断打印一行), G2(影子接管)决策缺少
+统计意义上的聚合数据。本次把对拍结果累积为进程级稳态统计。
+
+**改动**
+- C3BackwardCapture: Stats 加 `reconcile_total` / `reconcile_matched` 两字段
+  (+ 对应私有计数器, stats_mutex_ 保护); getStats() 透出。
+- diagnosePlannerReconcile: 每次对拍累加并输出 `[G1-RATIO] reconciled=M/N (P%)` 聚合行。
+- bench_llama_ffn_train 收尾输出 `[FFN-G1-STAT]`; test_c3_mnist_train 每 epoch 输出
+  `[C3-G1-STAT]`。
+- **默认路径零开销**: 统计仅在 `C3_PLANNER_DIAG=1` 诊断路径内累加; 未开启时
+  `reconcile_total_` 恒 0、收尾行不打印(已实测: 无 env 时 G1-STAT 输出 0 次)。
+
+**实测**
+- MNIST(FC-MIMO): `[C3-G1-STAT] reconcile=2/2 (100.0%)`, 5 个 epoch 稳定(2 个 MIMO shape)。
+- FFN-MIMO 默认: `reconcile=0/1 (0.0%)`(大维度代价门未过, 与 §4.75 一致)。
+- FFN-MIMO 强制: `reconcile=1/1 (100.0%)`。
+
+注: MIMO 编译按 shape 缓存, 同一结构只对拍一次 → "稳态"体现在**跨结构/维度累积**,
+而非同结构重复。后续多场景连续运行可累积出更宽的样本面。
+
+**验证**: graph 117 / backward max_diff=0 / swiglu 全过 / fusion_planner 17 /
+forward_capture 4 全绿; MNIST acc 97.1421% 基线不变。
