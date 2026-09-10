@@ -24,6 +24,8 @@
 #include "CtorchScheduler.h"
 #include "C3/Graph.h"
 #include "C3/C3Engine.h"
+#include "C3/C3OrchestratedKernel.h"
+#include "C3/FusionPlanner.h"
 #include "C3/Tracer.h"
 #include "C3/C3KernelRegistry.h"
 #include "C3/PGOManager.h"
@@ -1515,7 +1517,59 @@ TEST(MLIRBackend, TransposeSumReduceAxis1MultiNode) {
     EXPECT_TRUE(tensorsAllClose(results[0], eager));
 }
 
-// ======================= JIT2.0 三 op 收口：MatMulOp 端到端 =======================
+// [G3 真接管] OrchestratedKernel: 编排执行与整图执行逐位一致
+// 覆盖三个关键点: ① separator(SumReduce) 独立切出 ② 跨子图依赖(Mul 消费 SumReduce 输出)
+// ③ Const 物化(Add 消费图内常量 one)。
+TEST(MLIRBackend, OrchestratedKernelMatchesWholeGraph) {
+    using namespace ct::c3;
+
+    // 图: x[2,4] -> SumReduce(axis=0)[4] -> Mul(s,c)[4] (无广播, 聚焦编排逻辑)
+    // 覆盖: separator(SumReduce) 独立切出 + 跨子图依赖(Mul 消费 SumReduce 输出)。
+    Graph g;
+    auto x_desc = TensorDesc::fromShape({2, 4});
+    auto v4 = TensorDesc::fromShape({4});
+    size_t x = g.addInput(x_desc);
+    size_t c = g.addInput(v4);
+    size_t s = g.addNode(SumReduceNode{x_desc, 0}, {x}, v4);   // separator
+    size_t y = g.addNode(MulNode{v4, v4}, {s, c}, v4);         // 依赖 s
+    g.markOutput(y);
+
+    // 整图内核
+    auto whole = compileMLIR(g);
+    ASSERT_NE(whole, nullptr);
+
+    // 输入
+    Tensor X(ShapeTag{}, {2, 4});
+    Tensor C(ShapeTag{}, {4});
+    fillTensor(X, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f});
+    fillTensor(C, {0.5f, 0.5f, 0.5f, 0.5f});
+
+    // planner + partitionGraph 切分(SumReduce 独立 → 必切出多子图)
+    RegionFusionPolicy policy;
+    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, policy);
+    std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
+    ASSERT_GT(subs.size(), 1u);
+
+    // 编译各子图 + 编排内核
+    std::vector<std::shared_ptr<CompiledKernel>> sub_kernels;
+    sub_kernels.reserve(subs.size());
+    for (auto& s : subs) {
+        auto k = compileMLIR(s.graph);
+        ASSERT_NE(k, nullptr);
+        sub_kernels.push_back(std::move(k));
+    }
+    auto orch = buildOrchestratedKernel(g, subs, sub_kernels);
+    ASSERT_NE(orch, nullptr);
+
+    // 相同输入, 逐位一致
+    auto whole_out = whole->execute({X, C});
+    auto orch_out = orch->execute({X, C});
+    ASSERT_EQ(whole_out.size(), 1u);
+    ASSERT_EQ(orch_out.size(), 1u);
+    EXPECT_TRUE(tensorsAllClose(whole_out[0], orch_out[0]));
+}
+
+
 // 覆盖 c3.matmul op 在单/多节点路径的创建，以及 MatMulOpLowering 的三种策略选择
 // （small_inline / tiled / cblas）、transpose folding 与 epilogue 融合。
 

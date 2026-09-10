@@ -2352,3 +2352,42 @@ fusion-knee-calibration-criterion-correctness.md。
 
 **G3 接管前置更新**: 分隔符覆盖(§4.82) + 判据正确性(§4.83)均已确认, 前置仅剩
 "planner 判定接入执行决策"这一实现本身(待办 ④)。
+
+## 4.84 2026-09-10 G3 真接管落地: OrchestratedKernel 编排执行 + 默认零影响
+
+承接 §4.82/§4.83。前置(分隔符覆盖 + 判据正确性)已齐, 本轮实现 G3 真接管(待办④):
+让 planner 判定真正参与 MIMO backward 的融合决策, 带开关、默认零影响。
+
+**实现(开闭原则: CompiledKernel 多态, 运行时路径零改动)**
+- 新增 `C3OrchestratedKernel.h`: `OrchestratedKernel : CompiledKernel`, 内部持多子内核 +
+  拓扑序, execute() 按序编排(上游输出喂下游) + 预物化 Const + 按整图输出顺序返回。
+  因 registry/运行时只认 `shared_ptr<CompiledKernel>` 调 execute(), 故 installBackward/
+  tryExecuteBackward **零改动**。
+- `C3BackwardCapture.cpp`: 新增 `tryG3TakeoverKernel()`, 在 FC/FFN 两个 MIMO 编译路径
+  接入——`C3_G3_TAKEOVER=1` 时 planner(RegionKernel+Strict) + partitionGraph 切分;
+  判"不合并"(多子图)则编译子图 + 编排内核; 判"合并"(单子图)或子图编译失败则回退整图。
+- `C3Config.h`: `g3TakeoverEnabled()`(env `C3_G3_TAKEOVER`, 默认关)。
+
+**数值验证(逐位一致)**
+| 验证 | 结果 |
+|---|---|
+| FFN 5-step loss 序列(默认 vs 接管) | **5 值逐位一致**(5.8210/14533136/131903728/55509092/28272042) |
+| MNIST acc(FC-MIMO 接管) | 97.1421% / loss 0.0985 基线不变 |
+| OrchestratedKernel 单测(separator+跨子图依赖) | 整图 vs 编排逐位一致 |
+| 默认路径(无开关) | 无 G3-TAKEOVER 输出, 行为不变 |
+
+**性能观察**: 真实训练里接管收益被稀释——A/B 设施(纯内核)测"切分快 3.5-4%",
+但真实 backward 路径(含 registry 查找/输入构造/输出搬运等固定开销)下, 接管 bwd 中位数
+与整图几乎持平(约 -1~2%, 接近噪声)。方向一致但幅度远小于纯内核测量。这提示:
+G3 接管的实际收益可能主要来自"买扩展性"(新结构自动适配), 而非单点 3-4% 提速。
+
+**新发现 MLIR 广播 shape 推断 bug(P2, 既有, 非本轮引入)**
+- 触发: 标量 `[1]` 张量作为 **rhs**(第二输入)参与广播(如 `Add([4], [1])`), 且该标量是
+  普通输入(非 Const 常量折叠)。MLIR 把输出 shape 错判为 `[1]`(用了 rhs shape)而非 `[4]`。
+- 整图里 Const 被常量折叠故正确; partitionGraph 切分后 Const 变 INPUT 占位 → 暴露该 bug。
+- 影响面: 仅"标量 Const 作为 rhs 广播"场景。FFN/FC 的标量 `Const(1)` 均为 **lhs**
+  (`Add(Const,Exp)` 等), 故 G3 接管不受影响(已由 5-step loss 逐位一致证实)。
+- 建议: 独立立项修复 MLIR 广播 shape 推断(rhs 标量广播), 或至少加回归测试锁定。
+
+**回归**: fusion_planner 27 / graph 118(+OrchestratedKernel) / backward max_diff=0 /
+forward_capture 4 / machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST 97.1421% 基线不变。
