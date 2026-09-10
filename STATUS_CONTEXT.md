@@ -2427,3 +2427,35 @@ forward_capture 4 / machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST 97.14
 | MNIST acc / loss | 97.1421% / 0.0985 基线不变 |
 | G3 接管(FFN+FC) | loss/acc 与默认一致, 编排内核正常接管 |
 | 回归 | fusion_planner 27 / graph 118 / backward / forward_capture / fingerprint 3 / sum_mean_grad 18 全绿 |
+
+## 4.86 2026-09-10 G3 收官决策: 影子默认开(③) + 接管维持默认关(①)
+
+承接 §4.84/§4.85。G3 迁移决策门的两项收尾决策。
+
+**③ 影子观测改为默认开(`plannerShadowEnabled`)**
+- 改动: `C3Config.h` 的 `plannerShadowEnabled()` 从"env 未设=关"改为**默认开**;
+  显式 `C3_PLANNER_SHADOW=0` 可关闭。
+- 依据: 影子纯观测(**绝不改行为**), 且仅在 MIMO 异步编译线程内跑一次 planner 判定
+  (O(节点数), 非热路径), 开销可忽略; 唯有常态开启才能持续累积"planner 会错/不会错"证据。
+- 验证:
+  - FFN 默认(无 env): 影子开, planner 判 2 内核 ≠ MIMO 1 内核 → 输出
+    `[G2-SHADOW-MISMATCH] ... (planner 判定与现状不符; 仍走 MIMO, 不改行为)`;
+    且 FFN loss=5.8210 不变。
+  - MNIST 默认: FC-MIMO planner 判定与 MIMO 一致 → **静默**(0 行输出)。
+  - `C3_PLANNER_SHADOW=0`: 关闭, 0 行输出。
+  - MNIST acc 97.1421% / loss 0.0985 基线不变; 回归全绿。
+
+**① G3 接管维持默认关(`g3TakeoverEnabled` 不变)**
+- 决策: **保持默认关**(现状: 走 MIMO 整图单内核), 接管能力就绪、按需 `C3_G3_TAKEOVER=1` 开启。
+- 依据(全部为本会话实测):
+  1. **真实收益被稀释**: A/B 设施(纯内核)测切分快 3.5-4%, 但真实 backward 路径
+     (含 registry 查找/输入构造/输出搬运等固定开销)下, 接管 bwd 中位数与整图几乎持平
+     (约 -1~2%, 接近噪声, §4.84)。
+  2. **FC 结构为负收益**: FC-MIMO 接管后慢约 6%(SumReduce 分隔符独立成内核 →
+     多一次 launch 税, §4.82)。而 FC 是小图, 该税占比高。
+  3. **收益方向不定**: 同一次接管对 FFN 有利、对 FC 不利, 需按结构判定; 当前
+     planner 的 region 判定不决定"分隔符是否独立内核", 故接管并非全局更优。
+  4. 现状(MIMO 整图)已由生产验证(MNIST 97.1421%); 接管价值主要在**买扩展性**
+     (新图结构自动适配), 而非即时提速。
+- 结论: 接管作为**就绪能力**保留(带开关、数值逐位一致、可回退), 待出现
+  "region 判定能同时优化分隔符归属"的新判据后, 再评估默认开启。

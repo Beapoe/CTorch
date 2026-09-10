@@ -48,6 +48,7 @@
 - §4.83 拐点标定: Strict 判据全维度判对(6 维度, 拐点精确吻合) → **收益模型无需重设计(撤销待办②)**(STATUS 新)
 - §4.84 G3 真接管落地: OrchestratedKernel 编排执行 + `C3_G3_TAKEOVER=1`(默认关=整图); FFN 5-step loss 逐位一致; 发现 MLIR rhs 标量广播 shape 推断 bug(P2)(STATUS 新)
 - §4.85 修复 fuse 融合的 rhs 标量广播越界读: `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs); FFN/MNIST 数值逐位不变(STATUS 新)
+- §4.86 G3 收官决策: 影子观测改**默认开**(③, 纯观测零风险); G3 接管**维持默认关**(①, 真实收益被稀释+FC负收益)(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -57,7 +58,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → G3**: ① 默认维持 Strict ✅ ② ~~收益模型重设计~~ **撤销**(§4.83) ③ 补实验**完成**(§4.83) ④ **G3 真接管落地**(§4.84) ⑤ ~~修 MLIR rhs 标量广播 bug~~ **已修**(§4.85)。**剩余**: ① 常态开影子累积证据 ② 决定是否默认开启接管(需权衡 FFN 收益 vs FC 慢 6% + 真实收益被稀释) —— (HITL)。
+1. **通用图融合 → G3(收官)**: ① 默认维持 Strict ✅ ② ~~收益模型重设计~~ **撤销**(§4.83) ③ 补实验**完成**(§4.83) ④ **G3 真接管落地**(§4.84) ⑤ ~~修 MLIR rhs 标量广播 bug~~ **已修**(§4.85) ⑥ 常态化影子**已默认开**(§4.86) ⑦ 接管默认开否**已决策=维持默认关**(§4.86: 真实收益被稀释+FC负收益, 作为就绪能力保留)。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
@@ -128,7 +129,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 - `C3_ENABLE_BACKWARD=0` 关 C3 backward(走 eager; 注意 forward 仍可能走 C3 单 kernel, 非纯 eager 对照)
 - `C3_HOOK_CAPTURE=1` 真实训练 forward 整图旁路采集(MNIST/FFN 一致率, off-path)
 - `C3_PLANNER_DIAG=1` 真实 fused_graph 上 planner 分区 + BW-RECONCILE(off-path, 详细诊断)
-- `C3_PLANNER_SHADOW=1` **G2 影子观测**: planner 静默对拍, 仅不一致时告警 `[G2-SHADOW-MISMATCH]`; 绝不改行为
+- `C3_PLANNER_SHADOW` **G2 影子观测(默认开, §4.86)**: planner 静默对拍, 仅不一致时告警 `[G2-SHADOW-MISMATCH]`; 绝不改行为。设 `C3_PLANNER_SHADOW=0` 关闭
 - `C3_FORCE_REGION_MERGE=1` 强制 region 跨分量合并(跳过代价门, 只验结构等价性; 代价判定后补)
 - `C3_REGION_MERGE_ALLOW=1` **ADR-0002 方案 C**: 跨分量默认合并 + 规模保护(替代相对收益门槛); 默认关=Strict
 - `C3_PARTITION_AB=1` **[实测] A/B: 整图 1 内核 vs 按 planner 切分多内核**(交错 30 轮配对, 需配合 `C3_PLANNER_DIAG=1`)
@@ -171,7 +172,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | ~~P1~~ | ~~hotpath SiLU 缺失~~ | ✅ 已修(立项 C, STATUS §4.74): makeNodeVariant/isSupportedOp/isUnaryOp/MatMulActivation + epilogue lowering 全补齐 | 残留仅"无 bias FFN fused_hit=0"这一既有 P1, 与 SiLU 正确性无关 |
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
-| **P2** | 泛化融合已进 G3 接管(带开关) | planner 判定已可参与执行(`C3_G3_TAKEOVER=1`, §4.84); 默认仍走手写 MIMO | 常态开影子累积证据; 是否默认开启接管需 HITL 权衡(FFN 收益 vs FC 慢 6% + 真实收益被稀释) |
+| **P2** | 泛化融合已进 G3 接管(带开关, 默认关) | planner 判定已可参与执行(`C3_G3_TAKEOVER=1`, §4.84); **影子观测已默认开**(§4.86)常态累积证据; 接管默认开否**已决策=维持默认关**(§4.86) | 待出现"region 判定能同时优化分隔符归属"的新判据后再评估默认开启接管 |
 | ~~P2~~ | ~~MLIR rhs 标量广播 shape 推断 bug~~ | ✅ 已修(§4.85): 根因是 `fuse()` 融合含 rhs 标量广播的链后, fused 路径对标量 arg 越界读; 修复为 `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs) | 已闭环; FFN/MNIST 数值逐位不变 |
 | **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
 
