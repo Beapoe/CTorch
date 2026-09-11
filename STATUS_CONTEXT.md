@@ -2824,3 +2824,61 @@ MNIST loss 0.0985 acc 97.1421%(逐位不变)。
 **范围说明(未做部分)**: 本轮只统一了**同步 vs 同步**的去重。**同步 vs 异步**交叉去重
 未做 —— 同步 `compile()` 遇到 `state.pending` 中同 key 的异步编译时仍会自行编译。
 交叉去重需处理 `shared_future` 的等待与异常传播, 复杂度与风险更高, 已记为后续项。
+
+
+## 4.93 2026-09-10 FlatOutPool 进程级缓冲常驻清理(§4.91 A1)
+
+承接 §4.91 审查结论 A1: `FlatOutPool::instance()` 用 `new FlatOutPool()` never delete,
+`free_bufs` 中已归还的 buffer 常驻到进程结束。
+
+**先修正审查描述的一处**: 该池**并非无限增长**。`acquire()` 优先复用同 size 的空闲 buffer,
+故每种 size 的缓存量受「该 size 的峰值并发数」约束, 准确表述是
+**「涨到峰值后稳定、但永不释放」**。对一次性训练进程是一过性常驻; 对长期驻留服务
+(动态 batch / 多种 shape) 才会持续累积。问题真实但程度轻于"一直涨"。
+
+**为什么不能直接用 atexit**: `C3Engine.cpp` 注释已记录两次历史崩溃(segfault fix #2):
+静态析构阶段 `Tensor::~Tensor` 的 deleter 仍会访问该池; 而 `std::atexit` 回调与静态对象
+析构**共用同一 LIFO 队列**, 若池的 atexit 回调早于某个持有 Tensor 的静态对象析构,
+就会释放仍在使用的 buffer → use-after-free。故朴素 atexit 方案**本质不安全**,
+注释里那句 TODO 不能照做。
+
+**安全设计(保留 pool 永不析构, 只清数据)**
+
+1. 新增 `FlatOutPool::drain()`: 把 `free_bufs` 中所有 `char*` 收集后**在锁外** `std::free`,
+   并清空 map。安全性依据:
+   - **入池即代表引用归零** → free 的都是在用 buffer 之外的内存, 不会 use-after-free;
+   - **pool 与 `mu` 本身不析构** → 清理后若仍有 Tensor 析构, 其 deleter 仍能安全加锁访问池,
+     不会重蹈"静态析构顺序 → lock 已销毁 mutex"的崩溃。
+   即在"完全泄漏"与"不安全析构"之间取了第三条路: **释放数据、保留结构**。
+2. 新增 `draining` 标志: drain 后归还的 buffer 直接 free、不再入池, 避免退出阶段重新积累;
+   任何一次 `acquire()` 会复位该标志(池重新投入使用), 因此 shutdown 语义被误用一次
+   不会永久失去池化收益。
+3. 接入 `ct::c3::shutdownAll()` 作为**第 6 步**(最后执行): 前面各步释放 kernel/注册表时
+   可能触发 Tensor 析构把 buffer 归还入池, 须在其后再 drain 才清得干净。
+4. 新增可观测接口: `C3Engine::drainFlatOutPool()` 与 `C3Engine::getFlatOutPoolStats()`
+   (`FlatOutPoolStats{cached_buffers, cached_bytes}`), 使池占用可观测、可回归断言。
+
+**验证**
+
+新增测试 `test_c3_flatout_pool`(主仓 `src/tests/units/C3/`, 4 用例):
+
+| 用例 | 验证点 |
+|---|---|
+| `MultiNodeExecutionPopulatesPool` | 执行 Transpose→SumReduce MIMO 图后池中确有已归还 buffer(前置条件成立) |
+| `DrainReleasesCachedBuffers` | drain 后 `cached_buffers` / `cached_bytes` 归零 |
+| `DrainIsIdempotentAndPoolRecovers` | drain 可重复调用(空池安全); 之后 acquire 复位标志, 池恢复缓存且数值仍正确 |
+| `DrainThenLateTensorDestructionIsSafe` | 模拟「drain 后仍有 Tensor 析构」: 在用 buffer 不受影响(数值仍为 [6,15]), 迟到归还走 draining 分支不重新入池 |
+
+**阴性对照(证明测试有效)**: 将 `drain()` 临时改为空操作后重编译 → 3 个用例转红
+(实测池内容: `cached_buffers=1`, `cached_bytes=8`)。恢复后 4 用例全过。
+
+**回归**: `test_c3_graph` 118 / `test_fusion_planner` 29 / `test_forward_capture` 4 /
+`test_machine_fingerprint` 3 / `test_c3_compile_dedup` 4 / `test_c3_flatout_pool` 4 /
+`test_sum_mean_grad` ALL PASS / `test_c3_backward` max_diff=0 /
+MNIST loss 0.0985 acc 97.1421%(逐位不变); `test_c3_mnist_train` 的 `[CLEANUP]` 路径
+(会真正走 shutdownAll → drain) 正常退出, exit 0。
+
+**未做部分(如实记录)**: **未做堆级验证** —— 本测试的 MIMO 输出仅 8 字节(2 个 float),
+堆分配统计的噪声远大于该量级, 无法据此判定"内存确实归还 OS"。本轮在**逻辑层面**验证了
+"池内容被清空"与"drain 失效时测试转红", `std::free` 的实际调用由代码审查确认。
+若要端到端计数, 需构造大输出 MIMO 图并接 `malloc_zone_statistics`, 记为后续可选增强。
