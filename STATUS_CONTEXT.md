@@ -2697,3 +2697,75 @@ FFN 128x4096x11008:
 既有纪律"禁止单次测量定案"需再加一条:
 **提交性能结论前必须声明测量环境(load/背景进程), 并给出同配置重复测量的离散度;
 若离散度 >= 效应量, 该结论不得提交。** 本轮 FFN 各项即属此类, 故不作结论。
+
+
+## 4.91 2026-09-10 洛锦代码审查五条核实 + B3/C5 修复
+
+洛锦对 C3 提交审查意见 5 条(A 内存类 / B 一致性效率 / C 待核实)。逐条核实结论:
+4 条成立或部分成立, **1 条证伪**。
+
+**核实结论总表**
+
+| # | 审查项 | 核实结论 | 处置 |
+|---|---|---|---|
+| A1 | `FlatOutPool::instance()` 用 `new` never delete, `free_bufs` 只进不出 | ✅ 成立 | 记录待办 #11(需先设计 atexit 时序) |
+| A2 | `C3Engine::getInstance()` heap 单例 never delete | ✅ 成立, 但**系刻意设计**(注释已说明) | 仅记录, 不改 |
+| B3 | `doCompile` 第三参数 `cache_key` 是空壳 | ✅ 成立, **且实际比描述更严重** | ✅ **已修** |
+| B4 | 同步 `compile()` 无 in-flight 去重(异步有) | ✅ 成立 | 单独立项(待办 #12, 需并发回归) |
+| C5 | `MLIRKernelGen.cpp:2134` 硬编码 `111, 111` 疑似 tile 占位 | ❌ **证伪**(实为转置标志) | 具名常量(可读性)已修 |
+
+**A1 明细**: `C3Engine.cpp:153` `static FlatOutPool* p = new FlatOutPool();` 永不 delete;
+`free_bufs` 按 size 分桶缓存 `char*`, 仅同 size 复用, 长进程单调增长。注释内 TO-DO 已写明
+"实现显式 atexit 回调 free 所有 char* + delete pool"。**属真债**, 但当初改为 never delete 是为规避
+静态析构顺序(见 A2 同类问题), 故 atexit 方案须先验证时序, 不可直接改。
+
+**A2 明细**: `C3Engine.cpp:773` `static C3Engine* instance = new C3Engine();`。注释明确:
+"避免 Meyers singleton 在 LLVM/MLIR 全局析构后访问已销毁的 mutex。正常资源回收由
+`shutdownAll()` 显式完成"。`~C3Engine` 确实调用 `shutdown()`(try/catch 兜底不抛)。
+⇒ 判断为**刻意设计而非疏漏**, 仅记录在案; 改为自动析构有重踩旧坑风险。
+
+**B3 明细(已修)**: 审查描述为"函数体里 3 处自己 `makeCacheKey()` 重建"。
+核实: `doCompile` 函数体内实为 **4 处**(OneShot 缓存查询 1 处 + 三个 `CompiledKernel`
+构造分支各 1 处; 后三者互斥故单次执行 2 处)。审查所指"3 处"即那三个构造点, **判断准确**
+(初次核对时仅 grep 名为 `cache_key` 的变量, 漏掉内联 `makeCacheKey(...)`, 已纠正)。
+真正的浪费在调用链: 同步 `compile()` 单次 miss 路径上, 同一 key 最多被重算 **6 次**
+(锁内查 cache / 传参 / doCompile 内 OneShot + 构造分支 / 写 cache / profiling),
+而 `makeCacheKey` 内含 `graph.toString()` **全图序列化**; 且 `doCompile` 第三参数原先写作
+`const std::string& /*cache_key*/`, **调用方算完即弃**。
+
+修复:
+- `doCompile` 参数启用为 `const std::string& cache_key`, 内部 4 处重建全部改用参数;
+- `compile()` 开头生成一次 `const std::string cache_key`, 全程复用(pgo / 锁内查询 / 传参 /
+  写 cache / profiling 五处统一); 删除 4 处局部重复定义(其中含 shadow);
+- autotune `fitness_fn` 调用点原传 `""`, 改为 `makeCacheKey(g, opts)`。
+⇒ 同类问题与 §4.88 修的 planner 重复计算一致(审查判断正确)。
+
+**B4 明细(未修, 单独立项)**: `compile()` 的锁域为「锁内查 cache → **锁外** doCompile →
+锁内写 cache」。故并发同 key 同时 miss 时两线程各自编译, 再先后写 cache(后写覆盖, 结果
+无害但重复烧 CPU)。异步路径有 `state.pending` 去重(`:1222` / `:1596` 两处)。
+二者确实不一致。修法需引入 condition_variable + in-flight 标记(并发语义改动, 有死锁风险),
+故与 B3 分离, 待办 #12。
+
+**C5 明细(证伪)**: `MLIRKernelGen.cpp:2136` 的 `111, 111` **不是 tile 占位**。
+证据: `C3Ops.td:55` 明确记载 "transA/transB 携带上游 Transpose 折叠信息(111=NoTrans,
+112=Trans)"; 参数顺序为 `M, K, N, transA, transB, act, tileM, tileN, biasNumel`;
+调用中 `tileM/tileN` 已被显式传 0 且带 `/*tileM=*/0` 注释。故 111 落在 transA/transB 位, 语义正确。
+**但审查仍有价值**: 该处缺注释, 易被误读 —— 已提取文件级具名常量
+`kMatMulNoTrans = 111` / `kMatMulTrans = 112`(匿名 namespace, 与既有 `kDefaultTileM/N` 同处),
+替换该文件 5 处裸字面量(含折叠赋值与单节点构造)。
+注: `C3DialectLowering.cpp`(解释侧)与 `LinalgOneShotGen.cpp`(另一路径)仍有同义字面量,
+本轮未动(跨文件共享需公共头, 控制改动面), 记为后续可选统一。
+
+**验证(真实构建 + 运行)**
+
+- 构建: `build-release` ninja 全目标链接通过(exit 0; 仅既有 deprecation 警告)
+- 回归全绿: `test_c3_graph` 118 / `test_fusion_planner` 29 / `test_forward_capture` 4 /
+  `test_machine_fingerprint` 3 / `test_sum_mean_grad` ALL PASS / `test_c3_backward` max_diff=0
+- 数值: MNIST loss 0.0985 / acc 97.1421%(与基线逐位一致)
+- **缓存行为等价(关键证据)**: 修复前后 `[C3-STAT] compiles=4 hit=1 miss=0 tracked=11733`、
+  `[C3-BW-STAT] compile=11 bw_hit=4686 mimo_hit=4678 mn_calls=14042` **完全相同**
+  ⇒ 证明 cache key 语义未被改动(若 key 变化, hits/misses/compiles 必变)。
+
+**收益说明(不做性能裁决)**: 本修复主要消除**代码缺陷与冗余**(被忽略的参数、shadow、
+重复全图序列化), 在常规训练中编译次数少, 收益可忽略; 仅在编译密集路径(autotune QEA 搜索、
+多图编译)有实际意义。按 §4.90 新纪律, 小效应量且环境带噪, **本轮不提交任何性能结论**。
