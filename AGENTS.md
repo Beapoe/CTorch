@@ -17,7 +17,7 @@
 | **sum()/mean() 家族反向断链** | ✅ DONE | DotNode 缺失 bug; SumNode/MeanNode/DimReduceNode + NEON SIMD (主仓 99e1fae/dbe6e92/b57a52d) |
 | **sum-loss 死分支断链** | ✅ DONE | ComputeCore 活跃子图依赖重算 (主仓 3085a6b) |
 | **LLaMA FFN 反向 MIMO** | ✅ DONE | 无 bias SwiGLU FFN 整段反向→单内核 9 输出 (c3 12ac4c6, STATUS §4.59) |
-| LLaMA-1B FFN bench | ✅ 新增 | `bench_llama_ffn_train` (c3 vs eager ~5% 快, bwd ~8%) |
+| LLaMA-1B FFN bench | ✅ 新增 | `bench_llama_ffn_train` (原记 c3 vs eager ~5% 快, bwd ~8%; **§4.90 复现失败, 实测持平**, 待干净环境确认) |
 | 论文 | ✅ 更新 | 中英 MIMO 节加"无 bias SwiGLU FFN"扩展 (本地 paper/, gitignored) |
 | **通用图融合: 判据层 FusionPlanner** | ✅ off-path | 前向 Default / backward RegionKernel / 代价门(reload+launch vs 峰值live ws); 12 单测 (c3) |
 | **forward 整图捕获 ForwardCapture** | ✅ off-path | 真实 eager 前向 MatMul→ReLU → GEMM_EPILOGUE (test_forward_capture) |
@@ -26,7 +26,7 @@
 | **SiLU 提升为 c3 Graph 一等节点** | ✅ A+B | Graph SiLUNode + ForwardCapture/FusionPlanner 归类 + 执行层可编译(nodeVariantToOp/MLIR 发射/SiLUOpLowering); FFN forward 一致率可采 (STATUS §4.73) |
 | **hotpath SiLU 缺失修复(立项 C)** | ✅ 已修 | makeNodeVariant/isSupportedOp/isUnaryOp + MatMulActivation + epilogue lowering(act=4); MatMul+SiLU 融合数值正确 (STATUS §4.74) |
 | **region 强制合并(C3_FORCE_REGION_MERGE)** | ✅ 新增 | 解耦"结构是否正确"与"是否划算": 强制跳过代价门; FFN 4 维度 reconciled 全转 1; 默认行为不变 (STATUS §4.75) |
-| 迁移决策门 G0-G3 | ✅ **G3 接管已默认开启** | G1 数据齐 + G2 影子 + `partitionGraph` 切分 + 判据正确性(§4.83) + OrchestratedKernel 编排(§4.84) + 分隔符归属(§4.87) → **默认接管**(§4.88); FFN 更快(-2.7~-4.9%)、FC 持平、数值逐位一致; `C3_G3_TAKEOVER=0` 可回退 |
+| 迁移决策门 G0-G3 | ✅ **G3 接管已默认开启** | G1 数据齐 + G2 影子 + `partitionGraph` 切分 + 判据正确性(§4.83) + OrchestratedKernel 编排(§4.84) + 分隔符归属(§4.87) → **默认接管**(§4.88); 数值逐位一致(硬结论); 性能收益**待干净环境确认**(§4.90 复核: FFN 与 eager 持平, 原 -2.7~-4.9% 复现失败); `C3_G3_TAKEOVER=0` 可回退 |
 
 **最近变更速览** (详细日志见 `STATUS_CONTEXT.md` §4.53-4.71 + git log):
 - §4.53 MatMul epilogue 向量化; §4.54 DEBT-2 降级 + MNIST 画像
@@ -52,11 +52,17 @@
 - §4.87 分隔符归属判据: `merge_separator` 按工作集上界决定 separator 并入/独立(**默认开**, 纯改进); **消除 FC 接管负收益**(+4.17%→-0.49%), FFN 划分不变(STATUS 新)
 - §4.88 **G3 接管默认开** + 三处审计: 修 planner 重复计算(算 2-3 次→1 次, 口径统一); 拷贝无问题(Tensor 浅拷贝)(STATUS 新)
 - §4.89 **纠正 §4.88 误报**: LLVM IR 优化管线**已配置**(`makeOptimizingTransformer`)且**确实有效**(kernel 执行快 5.9~10.1%); 代价是 JIT 编译 +75~95%; **数值逐位一致**(loss 0.0985/acc 97.1421%/backward max_diff=0); 不修改默认。附: 「标量循环未被向量化」仅对 `SumReduce axis==1` 成立, 归因**浮点归约语义**而非管线缺失(STATUS 新)
+- §4.90 **性能复核: 测量环境被污染, 小效应量结论不可信**: 本机背景负载 >150% CPU, 同配置离散度最大 34%(C3 31~34% vs eager 4~7%, 三组复现); **FFN「C3 快 5~8%」复现失败**(稳定段持平 0.9%)、**§4.88 接管 -2.7% 不成立**(落在噪声内); 新增测量纪律: 离散度 >= 效应量则不得提交结论(STATUS 新)
 
-**当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
-- MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
-- LLaMA FFN(128×4096×11008): C3 ~180ms/step vs eager ~190ms (bwd MIMO ~8% 快)
-- MIMO 命中: MNIST mimo_hit 4678/epoch; FFN mimo_hit 命中, bw_hit 66→16
+**当前性能基线** (M3 Pro / 数值受热降频与背景负载影响):
+> ⚠️ **2026-09-10 复核(§4.90): 以下旧基线未在干净环境确认, 部分复现失败**。
+> 本机常驻背景负载 >150% CPU(浏览器/WindowServer/node), 同配置重复测量离散度最大 34% ⇒
+> 小效应量(<5%)结论不可提交。提交性能结论须附**测量环境 + 同配置离散度**。
+- MNIST: **acc 97.1421% / loss 0.0985 稳定可复现**; 稳态 epoch 165~196ms(§4.90 实测, 带负载);
+  旧值 138-160ms 未在同等条件下复现
+- LLaMA FFN(128×4096×11008): **C3 与 eager 持平**(§4.90 稳定段 159.6 vs 161.1 ms/step);
+  旧值「C3 ~180 vs eager ~190, 快 5~8%」**复现失败**, 待干净环境确认
+- MIMO 命中: MNIST mimo_hit 4678/epoch; FFN mimo_hit 命中, bw_hit 66→16 (命中率数据不受计时噪声影响)
 
 ## 🔧 下一步待办 (2026-09-10)
 
@@ -69,6 +75,11 @@
 6. DCU 节点验证 + x86 AVX-512 实测 (曙光智算, 机时充足; 正好验证自适应校准跨机分化)。
 7. **【可选优化, 非缺陷】IR 优化相关的两项(§4.89)**: ① 按 kernel 规模自适应 IR 优化 — 已配置且有效(kernel 执行 -5.9~-10.1%), 但编译开销 +75~95%; 对极短 kernel(如 FC 单次 72us)净负, 可评估按规模自适应开关(需独立实验标定拐点); ② `SumReduceOpLowering` 的 `axis==1` 分支是浮点归约且未设 fastmath ⇒ LoopVectorize 按严格 IEEE 拒绝向量化; 若要向量化需在 lowering 开 reassoc, 属**数值语义变更**, 须按 compiler-flags 协议单独评估。
 8. forward 优化 + RC2 进程级异步 (c3d, docs/C3_PROCESS_ASYNC_*)。
+9. **性能基线重测(§4.90, 优先)**: 需机器静默窗口(背景负载 <10%) + 多轮交错 + 长序列(摊薄一次性 JIT 编译);
+   重测 MNIST / FFN 两档 / G3 接管开关 / IR 优化开关; 产出可信基线表, 并**重新裁定** §4.88(接管 -2.7%)
+   与 FFN「C3 快 5~8%」两条结论。
+10. **C3 方差特性评估(§4.90 观察)**: 干净环境下确认 C3 离散度是否真大于 eager; 若成立则定位来源
+    (疑为 JIT 编译期对 CPU 争抢敏感), 并评估是否值得优化(如编译期让出/降优先级)。
 
 ## 设计蓝图 (docs/, 多未实现)
 
@@ -170,16 +181,18 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | 级别 | 问题 | 触发/现状 | 建议 |
 |------|------|----------|------|
 | **P0** | 无 | - | - |
-| **P1** | 训练期 region fusion 命中因结构而异 | MNIST(FC 带 bias) fused_hit 高; **LLaMA FFN(无 bias) fused_hit=0**(编译了不执行)。但 C3 default 仍最快(~5-10% vs hotpath-off) | 结论: 不是"C3 浪费"; forward 单 kernel + MIMO 已覆盖。训练期 forward fusion 命中是大 forward 结构(FFN)的可选增益 |
+| **P1** | 训练期 region fusion 命中因结构而异 | MNIST(FC 带 bias) fused_hit 高; **LLaMA FFN(无 bias) fused_hit=0**(编译了不执行)。但 C3 default 仍最快(~5-10% vs hotpath-off) | 结论: 不是"C3 浪费"; forward 单 kernel + MIMO 已覆盖。训练期 forward fusion 命中是大 forward 结构(FFN)的可选增益。注: 该行"C3 default 最快 ~5-10%"为旧测, §4.90 未复现 |
 | **P1** | sum-loss(非 CE 头)场景若图含无关死分支 | 已修: ComputeCore 活跃子图依赖重算(3085a6b); 正常 CE loss 训练不受影响 | 保留回归 test_sum_mean_grad(18 断言) |
 | **P1** | Stage 5.2 ARM NEON fused 0.77x (反直觉) | x86 AVX-512 + DCU 预期显著加速 | Stage 5.4 DCU 验证 |
 | **P1** | x86 AVX-512 实测未做 | 曙光智算机时充足 | Stage 5.4 |
 | ~~P1~~ | ~~hotpath SiLU 缺失~~ | ✅ 已修(立项 C, STATUS §4.74): makeNodeVariant/isSupportedOp/isUnaryOp/MatMulActivation + epilogue lowering 全补齐 | 残留仅"无 bias FFN fused_hit=0"这一既有 P1, 与 SiLU 正确性无关 |
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
-| **P2** | 泛化融合已默认接管(G3 落地) | **接管默认开**(§4.88), 数值逐位一致, FFN -2.7~-4.9%、FC 持平 | 后续: 手写 MIMO pattern 退场 |
+| **P2** | 泛化融合已默认接管(G3 落地) | **接管默认开**(§4.88), 数值逐位一致(硬结论); 性能: 原记 FFN -2.7~-4.9% 经 §4.90 复核**复现失败**(实测持平) | 性能待干净环境重测(待办 #9); 后续: 手写 MIMO pattern 退场 |
 | ~~P2~~ | ~~MLIR rhs 标量广播 shape 推断 bug~~ | ✅ 已修(§4.85): 根因是 `fuse()` 融合含 rhs 标量广播的链后, fused 路径对标量 arg 越界读; 修复为 `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs) | 已闭环; FFN/MNIST 数值逐位不变 |
 | ~~P2~~ | ~~LLVM IR 优化管线未配置~~ | ✅ **§4.89 已撤回(误报)**: 管线经 `mlir::makeOptimizingTransformer` 已配置且生效(kernel 执行快 5.9~10.1%, 7 轮交错验证); 优化开/关**数值逐位一致**(loss/acc/backward max_diff=0) | 无需修复; 可选见待办 #7 |
+| **P2** | 性能测量环境不可控, 小效应量结论不可信 | §4.90: 本机常驻背景负载 >150% CPU, 同配置离散度最大 34%; FFN「C3 快 5~8%」与 §4.88「接管 -2.7%」均落在噪声内 | 需干净窗口重测(见待办 #9); 提交性能结论须附环境与离散度 |
+| **P2** | C3 运行时间方差 > eager(观察, 待确认) | §4.90: 三组独立实验复现 C3 离散 31~34% vs eager 4~7%; 疑因 JIT 编译期对 CPU 争抢敏感 | 干净环境确认(见待办 #10); 若成立属真实特性而非测量噪声 |
 | **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
 
 ## Cross-Project Memory (Agent lessons, 跨项目适用)
