@@ -2563,3 +2563,50 @@ FFN loss 序列(5.8210/14533136/...) 均与改前逐位一致。
 **回归**: fusion_planner 29 / graph 118 / backward max_diff=0 / forward_capture /
 machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST acc 97.1421% / loss 0.0985 与
 FFN loss 序列(5.8210/14533136/131903728/...) 均与改前逐位一致。
+
+## 4.89 2026-09-10 纠正 §4.88 误报: LLVM IR 优化管线**已配置**且确实有效
+
+按洛锦指示修复 §4.88 记录的 P2("LLVM IR 优化管线未配置")。**经复核该结论是误报**, 本轮撤回。
+
+**误报原因(方法学教训)**
+- §4.88 审计时 grep 了 `PassBuilder` / `buildPerModuleDefaultPipeline` 等**字面量**, 未命中即判定"未配置"。
+- 实际配置点是 `MLIRKernelGen.cpp:2264` —— 主路径用 `mlir::makeOptimizingTransformer(opt_level, 0, tm)`
+  挂到 `ExecutionEngineOptions::transformer`; 该函数封装在 MLIR 的 `ExecutionEngine/OptUtils.h` 中,
+  **内部正是跑 LLVM 的 PassBuilder 默认管线**(含 LoopVectorize/SLP)。
+- 且 `MLIRKernelGen.cpp:2255-2259` 明确注释: 2026-08-12 曾因 DEBT-NEW-5 实验**特意重新启用**该 transformer,
+  原因是置空后"标量逐元素循环无 LoopVectorize/SLP 自动向量化, 实测比原生 SIMD kernel 慢 ~3.6x"。
+- 逃生开关: `C3_MLIR_NOOPT`(置了即关 transformer, 但 `jitCodeGenOptLevel` 不变) ⇒ 正是本实验所需的单一变量。
+
+**实测(compiler-flags 协议五步闭环)**
+
+(T) 假设 H: IR 优化管线已配置且生效; 证伪条件: 关掉它性能无显著差异。
+(PREDICTION): 若生效, `C3_MLIR_NOOPT=1` 应使 kernel 执行明显变慢。
+
+(EXP): 单一变量 `C3_MLIR_NOOPT`(1=关优化 / 不设=开); 对照组=默认开; 交错测量; 指标=kernel 执行时间
+(`bw_exec_us/bw_hit`, 不含编译) + JIT 编译时间 + 端到端 epoch/step; 环境同一 build 同一机器。
+
+(OBSERVATION) —— 全部为真实构建+运行:
+
+| 指标 | 优化开 | 优化关 | 结论 |
+|---|---|---|---|
+| MNIST kernel 单次执行(4686 次累计/4686) | **336.3ms(71.8us)** | 374.1ms(79.9us) | **开快 10.1%** |
+| MNIST epoch(7 轮交错, 6/7 关胜) | 210.40ms | **200.65ms** | 开慢 4.6% |
+| JIT 编译(FFN A 内核) | 28.4 / 26.6ms | **13.8 / 13.7ms** | 开慢 ~75-95% |
+| FFN 纯 kernel execute(A/B 设施) | 5.98ms | 6.00ms | 噪声级(0.3%) |
+| FFN step(3/5/20 steps 交错) | 略优 | -- | 开 9/9 胜, 但幅度 1.4-4.9%(含噪声) |
+
+(VERDICT):
+1. **✗ 误报撤回**: LLVM IR 优化管线**已配置**且**确实生效** —— kernel 执行快 10.1% 是硬证据。
+2. **代价明确**: IR 优化使 **JIT 编译时间增加 ~75-95%**(每 kernel +12~14ms)。
+3. **净效应 = 执行收益 vs 一次性编译开销**, 取决于"调用次数 × 单次执行时长":
+   - MNIST(5 epoch / FC kernel 单次仅 72us): 编译开销(一次性 ~87ms) > 执行收益(~38ms) ⇒ 净慢 4.6%
+   - FFN(20 step / kernel 单次 6ms): 两者相当 ⇒ 噪声级
+4. **不修改默认(维持优化开)**。理由: 编译开销是**一次性**, 执行收益是**每次调用**;
+   MNIST 的净负出现在"仅 5 epoch + 大量极短 kernel"的短训练里, 长训练会摊薄编译开销而保留执行收益;
+   且关闭优化会让 kernel 执行稳定慢 10%, 是更根本的退化。
+5. **可选优化(记为待办, 非缺陷)**: 按 kernel 规模自适应 —— 极短 kernel(如 FC 的 72us)
+   关闭 IR 优化以省编译开销, 长 kernel 保持开启。需独立实验标定规模拐点。
+
+**方法学教训(重要)**: 判断"某功能是否配置"不能只 grep 实现层字面量(PassBuilder);
+本项目的优化管线经 MLIR `OptUtils` 封装, 应查**封装层调用**(`makeOptimizingTransformer`/`transformer` 选项)。
+§4.88 的该条 P2 已从"已知问题"撤回。

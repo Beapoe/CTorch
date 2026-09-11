@@ -50,7 +50,8 @@
 - §4.85 修复 fuse 融合的 rhs 标量广播越界读: `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs); FFN/MNIST 数值逐位不变(STATUS 新)
 - §4.86 G3 收官决策: 影子观测改**默认开**(③, 纯观测零风险); G3 接管**维持默认关**(①, 真实收益被稀释+FC负收益)(STATUS 新)
 - §4.87 分隔符归属判据: `merge_separator` 按工作集上界决定 separator 并入/独立(**默认开**, 纯改进); **消除 FC 接管负收益**(+4.17%→-0.49%), FFN 划分不变(STATUS 新)
-- §4.88 **G3 接管默认开** + 三处审计: 修 planner 重复计算(算 2-3 次→1 次, 口径统一); 拷贝无问题(Tensor 浅拷贝); **发现 LLVM IR 优化管线未配置**(SumReduce 实际未向量化, 既有问题, 待独立验证)(STATUS 新)
+- §4.88 **G3 接管默认开** + 三处审计: 修 planner 重复计算(算 2-3 次→1 次, 口径统一); 拷贝无问题(Tensor 浅拷贝)(STATUS 新)
+- §4.89 **纠正 §4.88 误报**: LLVM IR 优化管线**已配置**(`makeOptimizingTransformer`)且**确实有效**(kernel 执行快 10.1%); 代价是 JIT 编译 +75~95%; 不修改默认(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -66,7 +67,7 @@
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
 5. **修 pre-existing standalone 失败**: test_c3_pgo_deopt/compile_error 已修绿; 仍红 = test_relu_backward (MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化, bench 波动类)。
 6. DCU 节点验证 + x86 AVX-512 实测 (曙光智算, 机时充足; 正好验证自适应校准跨机分化)。
-7. **LLVM IR 优化管线验证(§4.88 新发现)**: 评估加 LLVM IR pipeline(PassBuilder/默认 O3) 能否向量化 SumReduce 等标量循环; 按 compiler-flags 协议 (T)→(PREDICTION)→(EXP)→(OBSERVATION)→(VERDICT) 走; 注意编译耗时与数值一致性。
+7. **【可选优化, 非缺陷】按 kernel 规模自适应 IR 优化(§4.89)**: IR 优化已配置且有效(kernel 执行 -10.1%), 但编译开销 +75~95%; 对极短 kernel(如 FC 单次 72us)净负。可评估按规模自适应开关(需独立实验标定拐点)。
 8. forward 优化 + RC2 进程级异步 (c3d, docs/C3_PROCESS_ASYNC_*)。
 
 ## 设计蓝图 (docs/, 多未实现)
@@ -178,7 +179,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
 | **P2** | 泛化融合已默认接管(G3 落地) | **接管默认开**(§4.88), 数值逐位一致, FFN -2.7~-4.9%、FC 持平 | 后续: 手写 MIMO pattern 退场 |
 | ~~P2~~ | ~~MLIR rhs 标量广播 shape 推断 bug~~ | ✅ 已修(§4.85): 根因是 `fuse()` 融合含 rhs 标量广播的链后, fused 路径对标量 arg 越界读; 修复为 `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs) | 已闭环; FFN/MNIST 数值逐位不变 |
-| **P2** | LLVM IR 优化管线未配置(§4.88 审计发现) | MLIR→LLVM IR 后只设 `jitCodeGenOptLevel`, 无 `PassBuilder`/IR 管线 → `SumReduceOpLowering` 的标量循环**实际未被向量化**(注释假定 LLVM 会向量化内层 for-j) | 属既有问题; 全局性改动, 须按 compiler-flags 协议独立验证后再决定 |
+| ~~P2~~ | ~~LLVM IR 优化管线未配置~~ | ✅ **§4.89 已撤回(误报)**: 管线经 `mlir::makeOptimizingTransformer` 已配置且生效(kernel 执行快 10.1%, 7 轮验证) | 无需修复; 仅可选做"按 kernel 规模自适应优化" |
 | **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
 
 ## Cross-Project Memory (Agent lessons, 跨项目适用)
