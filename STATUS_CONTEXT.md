@@ -2459,3 +2459,58 @@ forward_capture 4 / machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST 97.14
      (新图结构自动适配), 而非即时提速。
 - 结论: 接管作为**就绪能力**保留(带开关、数值逐位一致、可回退), 待出现
   "region 判定能同时优化分隔符归属"的新判据后, 再评估默认开启。
+
+## 4.87 2026-09-10 分隔符归属判据: 消除 FC 接管的负收益, 自动融合转为全局更优
+
+承接 §4.86 的收官结论("待出现'region 判定能同时优化分隔符归属'的新判据")。本轮补齐该判据。
+
+**问题**
+§4.82 起 partitionGraph 把分隔符(SumReduce 等)切为独立 LEAF 内核(执行计划完整性所需)。
+但独立成内核 = **多一次内核调用开销**; 小图该开销占比显著: FC-MIMO 接管后
+A/B 实测慢 **+4.17%/+1.27%**(§4.86 记的约 6% 由此而来)。
+
+**关键洞察**
+region 内核在 C3 里实为「**节点间顺序执行 + 节点内并行**」(buildMultiNodeMLIR 逐节点生成
+循环), 故分隔符完全可以作为其中一个顺序节点并入 —— MIMO 整图单内核正是如此。
+所以"分隔符必须独立"并非不可违反的物理约束, 而是**代价权衡**:
+- 独立: 保住 region 并行收益, 但多一次内核调用开销;
+- 并入: 省调用开销, 但该 region 转为顺序执行(损失并行)。
+小图并行收益小 → 并入优; 大图并行收益大 → 独立优。
+
+**实现**
+- `RegionFusionPolicy` 新增 `merge_separator`(默认 true) + `separator_merge_ws_bytes`
+  (工作集上界, 默认 1MB)。
+- `planRegionKernel`: 判据 = `peak_live_ws(separator 独立划分) <= 上界` → 并入。
+  依赖为单向近似(ws 主要由 region 的 live 中间量决定, separator 影响小), 故先按
+  "separator 独立"估 ws 再决定; 把 ws 计算提取为 `peak_live_ws` 复用。
+- `C3Config.h`: `separatorMergeEnabled()`(env `C3_SEPARATOR_MERGE`), **默认开**;
+  阈值可 `C3_SEPARATOR_MERGE_WS` 覆盖。
+
+**实测标定(阈值 1MB)**
+| 场景 | ws | 划分 | 结果 |
+|---|---|---|---|
+| FC1 | 80KB | region[n=8](含 SumReduce) | A/B **-0.49%**(默认 +4.17%) |
+| FC2 | 326KB | region[n=8] | A/B **+0.05%**(默认 +1.27%) |
+| FFN | 7.34MB | region[21]+region[2] **不变** | A/B 与既有一致(拆更优) |
+
+真实训练(MNIST epoch, 各 3 次中位数):
+- 默认(MIMO): 207.998ms
+- 接管 + 并入开: **207.600ms(-0.19%)**
+- 接管 + 并入关: 209.332ms(+0.64%)
+=> **FC 接管的负收益消除**, 自动融合从"部分场景更优"转为"全局持平或更优"。
+
+**判据为纯改进**: 小图受益、大图划分完全不变(FFN 不受影响), 故默认开。
+
+**测试更新(test_fusion_planner 27→29)**
+- 3 个既有契约测试(`PartitionExposesConstAsExternalInputToDriver` /
+  `PartitionRecordsDependencyOnConsumedSeparator` / `OrchestratedKernelMatchesWholeGraph`)
+  原依赖"分隔符一律独立"的默认值, 现**显式设 `merge_separator=false`**——契约本身未变,
+  只是不再依赖默认值(测试应显式指定策略)。
+- 新增 2 个测试固化新行为:
+  - `SeparatorMergesIntoRegionWhenWorkingSetSmall`: 小工作集 → 并入, 只剩 1 子图
+  - `SeparatorStaysIndependentWhenWorkingSetLarge`: 超上界 → 独立, 至少 2 子图
+    (注: ws 统计的是**非图输出的中间量**, 故测试需构造真中间量, 否则 ws=0)
+
+**回归**: fusion_planner 29 / graph 118 / backward max_diff=0 / forward_capture /
+machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST acc 97.1421% / loss 0.0985 与
+FFN loss 序列(5.8210/14533136/...) 均与改前逐位一致。

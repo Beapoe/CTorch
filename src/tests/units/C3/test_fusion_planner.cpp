@@ -622,9 +622,11 @@ TEST(FusionPlanner, PartitionExposesConstAsExternalInputToDriver) {
     g.markOutput(sum);
 
     // 强制不跨分量合并, 确保产生子图而非忽略
+    // 显式关闭"分隔符并入"(§4.87)以固化"Const 作为子图外部输入"的契约
     RegionFusionPolicy strict;
     strict.min_benefit_ratio = 1.0;
     strict.launch_unit_bytes = 0;
+    strict.merge_separator = false;
     FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, strict);
     std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
     ASSERT_FALSE(subs.empty());
@@ -677,7 +679,10 @@ TEST(FusionPlanner, PartitionRecordsDependencyOnConsumedSeparator) {
     g.markOutput(y);
     g.markOutput(s);
 
-    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel);
+    // 显式关闭"分隔符并入"(§4.87), 固化"分隔符独立成子图 + 跨子图依赖被记录"的契约
+    RegionFusionPolicy strict;
+    strict.merge_separator = false;
+    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, strict);
     std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
 
     // 应有 2 个子图: Softmax(分隔符) + Mul(compute)
@@ -699,4 +704,68 @@ TEST(FusionPlanner, PartitionRecordsDependencyOnConsumedSeparator) {
     for (size_t up : subs[mul_sub].upstream_units)
         if (up == softmax_sub) dep = true;
     EXPECT_TRUE(dep);
+}
+
+// ======================= 分隔符归属 (§4.87 自动融合可用性) =======================
+// 分隔符默认并入相邻 region(小工作集), 消除"多一次内核调用开销"的负收益;
+// 工作集超上界时保持独立, 以留住 region 的并行收益。
+TEST(FusionPlanner, SeparatorMergesIntoRegionWhenWorkingSetSmall) {
+    Graph g;
+    auto d4 = TensorDesc::fromShape({4});
+    size_t x = g.addInput(d4);
+    size_t s = g.addNode(SoftmaxNode{d4}, {x}, d4);   // 分隔符
+    size_t y = g.addNode(MulNode{d4, d4}, {s, x}, d4); // compute, 消费 s
+    g.markOutput(y);
+    g.markOutput(s);
+
+    // 小工作集({4}) → 远小于默认上界(1MB) → 应并入
+    RegionFusionPolicy small;
+    small.merge_separator = true;
+    small.separator_merge_ws_bytes = 1024 * 1024;
+    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, small);
+    std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
+
+    // 并入后只剩 1 个子图(分隔符与消费者同 region), 不再独立
+    ASSERT_EQ(subs.size(), 1u);
+    bool has_sep = false, has_mul = false;
+    for (size_t nid : subs[0].unit_node_ids) {
+        if (nid == s) has_sep = true;
+        if (nid == y) has_mul = true;
+    }
+    EXPECT_TRUE(has_sep);
+    EXPECT_TRUE(has_mul);
+}
+
+// 工作集超上界时保持独立(守住大图的 region 并行收益)。
+// 注意: 工作集统计的是**非图输出的中间量**; 故此处需构造真中间量, 否则 ws=0。
+TEST(FusionPlanner, SeparatorStaysIndependentWhenWorkingSetLarge) {
+    Graph g;
+    auto d_big = TensorDesc::fromShape({64, 64});
+    size_t x = g.addInput(d_big);
+    size_t s = g.addNode(SoftmaxNode{d_big}, {x}, d_big);      // 分隔符
+    size_t m = g.addNode(MulNode{d_big, d_big}, {s, x}, d_big); // 真中间量(numel=4096)
+    size_t y = g.addNode(MulNode{d_big, d_big}, {m, x}, d_big); // 图输出
+    g.markOutput(y);
+    g.markOutput(s);
+
+    // 上界设得比工作集(4096)小 → 应保持独立
+    RegionFusionPolicy strict;
+    strict.merge_separator = true;
+    strict.separator_merge_ws_bytes = 16;
+    FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, strict);
+    EXPECT_GT(plan.region_metric.working_set_bytes, strict.separator_merge_ws_bytes);
+    std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
+
+    // 分隔符独立 → 至少 2 个子图
+    EXPECT_GT(subs.size(), 1u);
+    size_t softmax_sub = SIZE_MAX, mul_sub = SIZE_MAX;
+    for (size_t k = 0; k < subs.size(); ++k) {
+        for (size_t nid : subs[k].unit_node_ids) {
+            if (nid == s) softmax_sub = k;
+            if (nid == y) mul_sub = k;
+        }
+    }
+    ASSERT_NE(softmax_sub, SIZE_MAX);
+    ASSERT_NE(mul_sub, SIZE_MAX);
+    EXPECT_NE(softmax_sub, mul_sub);
 }

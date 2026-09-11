@@ -1546,8 +1546,10 @@ TEST(MLIRBackend, OrchestratedKernelMatchesWholeGraph) {
     fillTensor(X, {1.0f, 2.0f, 3.0f, 4.0f, 5.0f, 6.0f, 7.0f, 8.0f});
     fillTensor(C, {0.5f, 0.5f, 0.5f, 0.5f});
 
-    // planner + partitionGraph 切分(SumReduce 独立 → 必切出多子图)
+    // planner + partitionGraph 切分：本测试验证**多子图编排执行**路径,
+    // 故显式关闭"分隔符并入"(§4.87)——否则该小图会被并入成单子图。
     RegionFusionPolicy policy;
+    policy.merge_separator = false;
     FusionPlan plan = FusionPlanner::planUnits(g, FusionStrategy::RegionKernel, policy);
     std::vector<PartitionedSubGraph> subs = partitionGraph(g, plan);
     ASSERT_GT(subs.size(), 1u);
