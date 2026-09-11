@@ -26,7 +26,7 @@
 | **SiLU 提升为 c3 Graph 一等节点** | ✅ A+B | Graph SiLUNode + ForwardCapture/FusionPlanner 归类 + 执行层可编译(nodeVariantToOp/MLIR 发射/SiLUOpLowering); FFN forward 一致率可采 (STATUS §4.73) |
 | **hotpath SiLU 缺失修复(立项 C)** | ✅ 已修 | makeNodeVariant/isSupportedOp/isUnaryOp + MatMulActivation + epilogue lowering(act=4); MatMul+SiLU 融合数值正确 (STATUS §4.74) |
 | **region 强制合并(C3_FORCE_REGION_MERGE)** | ✅ 新增 | 解耦"结构是否正确"与"是否划算": 强制跳过代价门; FFN 4 维度 reconciled 全转 1; 默认行为不变 (STATUS §4.75) |
-| 迁移决策门 G0-G3 | ✅ **G3 真接管落地(带开关, 默认关)** | G1 数据齐 + G2 影子 + `partitionGraph` 切分 + 判据正确性(§4.83) + **OrchestratedKernel 编排执行 + `C3_G3_TAKEOVER=1`**(§4.84); FFN 5-step loss 逐位一致; 默认零影响 |
+| 迁移决策门 G0-G3 | ✅ **G3 接管已默认开启** | G1 数据齐 + G2 影子 + `partitionGraph` 切分 + 判据正确性(§4.83) + OrchestratedKernel 编排(§4.84) + 分隔符归属(§4.87) → **默认接管**(§4.88); FFN 更快(-2.7~-4.9%)、FC 持平、数值逐位一致; `C3_G3_TAKEOVER=0` 可回退 |
 
 **最近变更速览** (详细日志见 `STATUS_CONTEXT.md` §4.53-4.71 + git log):
 - §4.53 MatMul epilogue 向量化; §4.54 DEBT-2 降级 + MNIST 画像
@@ -50,6 +50,7 @@
 - §4.85 修复 fuse 融合的 rhs 标量广播越界读: `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs); FFN/MNIST 数值逐位不变(STATUS 新)
 - §4.86 G3 收官决策: 影子观测改**默认开**(③, 纯观测零风险); G3 接管**维持默认关**(①, 真实收益被稀释+FC负收益)(STATUS 新)
 - §4.87 分隔符归属判据: `merge_separator` 按工作集上界决定 separator 并入/独立(**默认开**, 纯改进); **消除 FC 接管负收益**(+4.17%→-0.49%), FFN 划分不变(STATUS 新)
+- §4.88 **G3 接管默认开** + 三处审计: 修 planner 重复计算(算 2-3 次→1 次, 口径统一); 拷贝无问题(Tensor 浅拷贝); **发现 LLVM IR 优化管线未配置**(SumReduce 实际未向量化, 既有问题, 待独立验证)(STATUS 新)
 
 **当前性能基线** (M3 Pro, 需干净机器, 数值受热降频 ±15% 波动):
 - MNIST 训练稳态 epoch ~138-160ms, acc 97.1421%, loss 0.0985
@@ -59,13 +60,14 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → G3(可用)**: ① 默认维持 Strict ✅ ② ~~收益模型重设计~~ **撤销**(§4.83) ③ 补实验**完成**(§4.83) ④ **G3 真接管落地**(§4.84) ⑤ ~~修 MLIR rhs 标量广播 bug~~ **已修**(§4.85) ⑥ 常态化影子**已默认开**(§4.86) ⑦ 接管默认开否=维持默认关(§4.86) ⑧ **分隔符归属判据已补齐**(§4.87, 默认开): **FC 接管负收益消除, 自动融合转为全局持平或更优**。**剩余**: 接管是否默认开(现净收益已转正, 可再评估) / 手写 MIMO pattern 退场。
+1. **通用图融合 → G3(已默认接管)**: ① 维持 Strict ✅ ② ~~收益模型重设计~~ **撤销**(§4.83) ③ 补实验 ✅ ④ 真接管落地 ✅ ⑤ rhs 广播 bug 已修 ✅ ⑥ 影子默认开 ✅ ⑦⑧ 分隔符归属 ✅ ⑨ **接管默认开**(§4.88) ✅。**剩余**: 手写 MIMO pattern 退场; LLVM IR 优化管线验证(见 P2)。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
 5. **修 pre-existing standalone 失败**: test_c3_pgo_deopt/compile_error 已修绿; 仍红 = test_relu_backward (MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化, bench 波动类)。
 6. DCU 节点验证 + x86 AVX-512 实测 (曙光智算, 机时充足; 正好验证自适应校准跨机分化)。
-7. forward 优化 + RC2 进程级异步 (c3d, docs/C3_PROCESS_ASYNC_*)。
+7. **LLVM IR 优化管线验证(§4.88 新发现)**: 评估加 LLVM IR pipeline(PassBuilder/默认 O3) 能否向量化 SumReduce 等标量循环; 按 compiler-flags 协议 (T)→(PREDICTION)→(EXP)→(OBSERVATION)→(VERDICT) 走; 注意编译耗时与数值一致性。
+8. forward 优化 + RC2 进程级异步 (c3d, docs/C3_PROCESS_ASYNC_*)。
 
 ## 设计蓝图 (docs/, 多未实现)
 
@@ -134,7 +136,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 - `C3_FORCE_REGION_MERGE=1` 强制 region 跨分量合并(跳过代价门, 只验结构等价性; 代价判定后补)
 - `C3_REGION_MERGE_ALLOW=1` **ADR-0002 方案 C**: 跨分量默认合并 + 规模保护(替代相对收益门槛); 默认关=Strict
 - `C3_PARTITION_AB=1` **[实测] A/B: 整图 1 内核 vs 按 planner 切分多内核**(交错 30 轮配对, 需配合 `C3_PLANNER_DIAG=1`)
-- `C3_G3_TAKEOVER=1` **[G3 真接管] planner 判定参与 MIMO backward 执行决策**(planner 判拆则切分编排执行; 默认关=整图单内核, 行为不变)
+- `C3_G3_TAKEOVER` **[G3 接管, 默认开 §4.88]**: planner 判定参与 MIMO backward 执行决策(判拆则切分编排执行, 判并/编译失败回退整图); 设 `=0` 关闭回退到整图单内核
 - `C3_SEPARATOR_MERGE` **[分隔符归属, 默认开 §4.87]**: 分隔符按工作集上界决定并入 region / 独立成内核; 设 `=0` 关闭(回到一律独立)。阈值可 `C3_SEPARATOR_MERGE_WS=<bytes>` 覆盖(默认 1MB)
 - `C3_FINGERPRINT=<path>` 覆盖机器指纹配置路径(默认 ./c3.fingerprint); 由 `c3ctl calibrate` 生成
 - `c3ctl calibrate --label <m>` 部署时跑机器探针写指纹; `c3ctl show` 用运行时 O(1) 读回
@@ -174,8 +176,9 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | ~~P1~~ | ~~hotpath SiLU 缺失~~ | ✅ 已修(立项 C, STATUS §4.74): makeNodeVariant/isSupportedOp/isUnaryOp/MatMulActivation + epilogue lowering 全补齐 | 残留仅"无 bias FFN fused_hit=0"这一既有 P1, 与 SiLU 正确性无关 |
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
-| **P2** | 泛化融合已具备全局可用条件 | planner 判定可参与执行(`C3_G3_TAKEOVER=1`, §4.84); 影子默认开(§4.86)累积证据; **分隔符归属已补齐**(§4.87 默认开)后 **FC 负收益消除、整体转为全局持平或更优** | 可再评估"接管默认开"(净收益已转正); 后续: 手写 MIMO pattern 退场 |
+| **P2** | 泛化融合已默认接管(G3 落地) | **接管默认开**(§4.88), 数值逐位一致, FFN -2.7~-4.9%、FC 持平 | 后续: 手写 MIMO pattern 退场 |
 | ~~P2~~ | ~~MLIR rhs 标量广播 shape 推断 bug~~ | ✅ 已修(§4.85): 根因是 `fuse()` 融合含 rhs 标量广播的链后, fused 路径对标量 arg 越界读; 修复为 `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs) | 已闭环; FFN/MNIST 数值逐位不变 |
+| **P2** | LLVM IR 优化管线未配置(§4.88 审计发现) | MLIR→LLVM IR 后只设 `jitCodeGenOptLevel`, 无 `PassBuilder`/IR 管线 → `SumReduceOpLowering` 的标量循环**实际未被向量化**(注释假定 LLVM 会向量化内层 for-j) | 属既有问题; 全局性改动, 须按 compiler-flags 协议独立验证后再决定 |
 | **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
 
 ## Cross-Project Memory (Agent lessons, 跨项目适用)

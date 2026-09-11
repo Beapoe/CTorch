@@ -2514,3 +2514,52 @@ region 内核在 C3 里实为「**节点间顺序执行 + 节点内并行**」(b
 **回归**: fusion_planner 29 / graph 118 / backward max_diff=0 / forward_capture /
 machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST acc 97.1421% / loss 0.0985 与
 FFN loss 序列(5.8210/14533136/...) 均与改前逐位一致。
+
+## 4.88 2026-09-10 G3 接管默认开启 + 三处"糖糖错误"审计
+
+承接 §4.87(分隔符归属补齐后净收益转正)。按洛锦指示默认开启接管, 并审计四类常见缺陷。
+
+**① G3 接管改为默认开(`g3TakeoverEnabled`)**
+- `C3Config.h`: 从"env 未设=关"改为**默认开**; 显式 `C3_G3_TAKEOVER=0` 回退整图单内核。
+- 依据(本会话实测): 数值逐位一致(§4.81/§4.84) + 补齐分隔符归属后 FC 由慢 4.17% 转持平
+  (§4.87) + FFN 32/64/128 三维度均不劣。
+- 性能复测(接管开 vs 关, 中位数):
+  | 场景 | 接管开 | 接管关 | 差异 |
+  |---|---|---|---|
+  | MNIST(FC, 3 次) | 209.00ms | 209.01ms | 持平 |
+  | FFN 128x1024x2048(3 次) | 13.6ms | 14.3ms | **-4.9%** |
+  | FFN 128x4096x11008(2 次) | 272.2ms | 279.7ms | **-2.7%** |
+  - FC 持平的原因: planner 判 1 子图(分隔符已并入) → `tryG3TakeoverKernel` 返回 nullptr
+    → 回退整图, 与关闭等价; 故 MNIST 无 `G3-TAKEOVER` 输出。
+  - FFN 判 2 子图 → 真正走切分编排 → 稳定更优。
+
+**② 审计发现并修复: planner 判定重复计算(真实缺陷)**
+- 问题: 同一图同一策略的 `planUnits(RegionKernel)` 被算了 **2-3 次**——
+  影子观测一次、`C3_PLANNER_DIAG` 再算 Default 策略一次、G3 接管再算一次;
+  且影子用 `region_units`、接管用 `subs.size()`, **口径可能不一致**。
+- 修复: 新增 `MimoPartition{policy, plan, subs}` + `computeMimoPartition()`, 规划**只算一次**;
+  `diagnosePlannerReconcile` 改为接收已算好的 plan/policy 与实际内核数
+  (`actual_kernels`), `tryG3TakeoverKernel` 改为接收已算好的 subs。
+- 副作用(正面): 影子文案从"与现状 MIMO 不符; 仍走 MIMO"改为"与实际执行不符";
+  默认开后 FFN 的预期告警**消失**(actual_kernels=2 == planner_wants=2 → 一致 → 静默)。
+
+**③ 审计: 多余拷贝 —— 无问题**
+- `Tensor` 拷贝构造/赋值均为**浅拷贝**(共享 `_storage`), `OrchestratedKernel::execute` 里的
+  `tensorByOrig` / `sub_inputs` / `result` 传递只拷贝元数据 + 引用计数, 不复制数据。
+
+**④ 审计: 向量化 / Pass —— 发现一个既有缺口(未修, 待立项)**
+- MLIR 侧 Pass 管线正常: lowering → Canonicalizer → CSE → (转换) → CanonicalizerPost → CSEPost
+  (`C3DialectLowering.cpp:1089-1127`); 逐元素族另有手写向量化
+  (`buildFusedMultiNodeVectorized`, `<VL x float>`), MatMul 走 cblas。
+- **但 LLVM IR 侧未配置优化管线**: 只有 `jitCodeGenOptLevel`(CodeGenOptLevel::Aggressive),
+  全局搜不到 `PassBuilder` / `buildPerModuleDefaultPipeline` / `runOptimization*`。
+- 影响: `SumReduceOpLowering`(`C3DialectLowering.cpp:558`) 生成的是**标量循环**,
+  其注释写明"LLVM 可向量化内层 for-j"——但 LoopVectorize 是 **IR 级 pass**,
+  在未配置 IR 管线时不会运行 ⇒ **SumReduce 实际未被向量化**。
+- 判定: 属**既有问题**(非本轮引入), 且是全局性改动(所有 C3 kernel 都会变),
+  需依 `compiler-flags` 协议走 (T)→(PREDICTION)→(EXP)→(OBSERVATION)→(VERDICT) 独立验证后
+  再决定是否加 IR 管线 ⇒ 本轮仅记录, 未改。
+
+**回归**: fusion_planner 29 / graph 118 / backward max_diff=0 / forward_capture /
+machine_fingerprint 3 / sum_mean_grad 18 全绿; MNIST acc 97.1421% / loss 0.0985 与
+FFN loss 序列(5.8210/14533136/131903728/...) 均与改前逐位一致。
