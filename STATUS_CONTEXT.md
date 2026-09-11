@@ -2769,3 +2769,58 @@ FFN 128x4096x11008:
 **收益说明(不做性能裁决)**: 本修复主要消除**代码缺陷与冗余**(被忽略的参数、shadow、
 重复全图序列化), 在常规训练中编译次数少, 收益可忽略; 仅在编译密集路径(autotune QEA 搜索、
 多图编译)有实际意义。按 §4.90 新纪律, 小效应量且环境带噪, **本轮不提交任何性能结论**。
+
+
+## 4.92 2026-09-10 同步 compile() in-flight 去重落地(§4.91 B4) + 阴性对照验证
+
+承接 §4.91 审查结论 B4: 同步 `compile()` 锁域为「锁内查 cache → 锁外 doCompile →
+锁内写 cache」, 并发同 key 同时 miss 时各线程会重复编译(结果无害但白烧 CPU);
+而异步路径已有 `state.pending` 去重, 二者语义不一致。
+
+**设计**
+
+新增 `EngineState::compiling_keys`(`key → 发起编译的线程 id`) + `cache_cv`:
+- **不同线程、同 key**: 后来者 `cache_cv.wait()` 等待, 唤醒后回到循环顶部**重查缓存**
+  复用他人结果(`dedup_waits++`);
+- **同线程重入同 key**: 不等待, 直接取得编译权 —— 否则 `doCompile` 调用链若回到
+  `compile()` 会自死锁; 记录 owner 线程 id 即为此;
+- **`enable_cache=false`**: 不做去重。结果不写 cache 时, 等待者唤醒后仍须自行编译,
+  等待纯属白费且引入无谓串行化;
+- **RAII(`InFlightGuard`)**: 正常返回 / 抛异常 / 提前 return 均释放标记并 `notify_all`,
+  否则等待者会永久阻塞。
+
+**新增统计**(`C3CacheStats`): `sync_compiles`(同步实际编译次数) 与 `dedup_waits`(等待次数)。
+修复前无任何指标能量化该问题, 加字段后去重可被观测与回归断言。另修正一处统计语义:
+`misses` 用 `counted_miss` 保证每次 `compile()` 调用最多记一次(等待唤醒后重查不重复计数)。
+
+**验证**
+
+新增测试 `test_c3_compile_dedup`(主仓 `src/tests/units/C3/`, 4 用例):
+
+| 用例 | 验证点 |
+|---|---|
+| `ConcurrentSameKeyCompilesOnce` | 8 线程经自旋栅栏同时 compile 同 key → `sync_compiles` 增量 **1**、`dedup_waits` > 0、8 线程全部拿到内核 |
+| `CacheDisabledSkipsWaitPath` | `enable_cache=false` 时 `dedup_waits` 不变, 每线程各自编译 |
+| `SameThreadRepeatedCompileHitsCache` | 同线程重复 compile 同 key 不自等待(不死锁), 第二次命中缓存且复用同一内核对象 |
+| `FailureDoesNotPoisonInflight` | 编译失败后不残留 in-flight 标记(带超时保护, 不挂死测试套件) |
+
+**阴性对照(证明测试有效, 非恒真)**
+
+仅将去重判据临时改为恒真(禁用去重路径)后重编译运行:
+
+| 指标 | 去重启用 | 去重禁用 |
+|---|---|---|
+| `sync_compiles` 增量 | **1** | **8** |
+| `dedup_waits` 增量 | >0 | 0 |
+| 用例结果 | PASS | **FAIL** (`ConcurrentSameKeyCompilesOnce`) |
+
+⇒ 一是证明测试确实能捕获该回归; 二是**量化了问题本身**: 8 个并发同 key 请求在修复前
+会产生 **8 次重复编译**。阴性对照后已恢复原逻辑并复跑通过。
+
+**回归**: `test_c3_graph` 118 / `test_fusion_planner` 29 / `test_forward_capture` 4 /
+`test_machine_fingerprint` 3 / `test_sum_mean_grad` ALL PASS / `test_c3_backward` max_diff=0 /
+MNIST loss 0.0985 acc 97.1421%(逐位不变)。
+
+**范围说明(未做部分)**: 本轮只统一了**同步 vs 同步**的去重。**同步 vs 异步**交叉去重
+未做 —— 同步 `compile()` 遇到 `state.pending` 中同 key 的异步编译时仍会自行编译。
+交叉去重需处理 `shared_future` 的等待与异常传播, 复杂度与风险更高, 已记为后续项。

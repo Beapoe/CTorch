@@ -54,6 +54,7 @@
 - §4.89 **纠正 §4.88 误报**: LLVM IR 优化管线**已配置**(`makeOptimizingTransformer`)且**确实有效**(kernel 执行快 5.9~10.1%); 代价是 JIT 编译 +75~95%; **数值逐位一致**(loss 0.0985/acc 97.1421%/backward max_diff=0); 不修改默认。附: 「标量循环未被向量化」仅对 `SumReduce axis==1` 成立, 归因**浮点归约语义**而非管线缺失(STATUS 新)
 - §4.90 **性能复核: 测量环境被污染, 小效应量结论不可信**: 本机背景负载 >150% CPU, 同配置离散度最大 34%(C3 31~34% vs eager 4~7%, 三组复现); **FFN「C3 快 5~8%」复现失败**(稳定段持平 0.9%)、**§4.88 接管 -2.7% 不成立**(落在噪声内); 新增测量纪律: 离散度 >= 效应量则不得提交结论(STATUS 新)
 - §4.91 **洛锦审查五条核实**: A1 `FlatOutPool` heap never delete(真债, 待办 #11)、A2 `C3Engine` 单例(刻意设计, 仅记录)、**B3 已修**(`doCompile` 第三参数原为空壳, 同步 compile 单次 miss 路径 key 被重算最多 6 次含全图序列化 → 改一次复用)、B4 同步路径无 in-flight 去重(待办 #12)、**C5 证伪**(`111,111` 是 transA/transB 非 tile; 已提具名常量)。回归全绿 + 缓存统计逐位等价(STATUS 新)
+- §4.92 **同步 compile() in-flight 去重落地**(§4.91 B4): `compiling_keys`(key→owner 线程)+`cache_cv`; 同线程重入不等待(防自死锁)、`enable_cache=false` 不去重、RAII 保证异常路径释放; 新增 `sync_compiles`/`dedup_waits` 统计; **阴性对照** 证明测试有效(去重禁用时 8 线程 → 8 次重复编译, 测试转红); 新增 `test_c3_compile_dedup` 4 用例(STATUS 新)
 
 **当前性能基线** (M3 Pro / 数值受热降频与背景负载影响):
 > ⚠️ **2026-09-10 复核(§4.90): 以下旧基线未在干净环境确认, 部分复现失败**。
@@ -84,8 +85,9 @@
 11. **`FlatOutPool` atexit 清理(§4.91 A1)**: 实现显式 atexit 回调 free 所有 `char*` + delete pool,
     消除进程级泄漏。**前置**: 先设计并验证 atexit 与静态析构的相对时序(当初改 never delete 就是为了
     规避该顺序问题), 属架构决策, 建议按 ADR 流程走。
-12. **同步 `compile()` in-flight 去重(§4.91 B4)**: 统一同步/异步的 pending 语义(异步已有
-    `state.pending`); 需引入 condition_variable, 注意死锁风险, 须配并发回归测试。
+12. **~~同步 `compile()` in-flight 去重~~ ✅ 已于 §4.92 完成**。**残留**: 同步 vs 异步
+    交叉去重 —— 同步 `compile()` 遇到 `state.pending` 中同 key 的异步编译时仍会自行编译;
+    需处理 `shared_future` 的等待与异常传播, 风险更高, 单独立项。
 
 ## 设计蓝图 (docs/, 多未实现)
 
@@ -198,7 +200,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | ~~P2~~ | ~~MLIR rhs 标量广播 shape 推断 bug~~ | ✅ 已修(§4.85): 根因是 `fuse()` 融合含 rhs 标量广播的链后, fused 路径对标量 arg 越界读; 修复为 `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs) | 已闭环; FFN/MNIST 数值逐位不变 |
 | ~~P2~~ | ~~LLVM IR 优化管线未配置~~ | ✅ **§4.89 已撤回(误报)**: 管线经 `mlir::makeOptimizingTransformer` 已配置且生效(kernel 执行快 5.9~10.1%, 7 轮交错验证); 优化开/关**数值逐位一致**(loss/acc/backward max_diff=0) | 无需修复; 可选见待办 #7 |
 | **P2** | `FlatOutPool` 内存只进不出(进程级) | `C3Engine.cpp:153` `new FlatOutPool()` never delete; `free_bufs` 按 size 分桶缓存, 长进程单调增长。注释内 TODO 已写明 atexit 方案 | 待办 #11; 须先验证 atexit 时序(当初改 never delete 正是为规避静态析构顺序) |
-| **P2** | 同步 `compile()` 缺 in-flight 去重 | §4.91 B4: 锁域为「锁内查 cache → 锁外 doCompile → 锁内写 cache」, 并发同 key 同时 miss 会重复编译(结果无害, 白烧 CPU); 异步有 `state.pending` 去重, 二者不一致 | 待办 #12; 需 condition_variable, 属并发语义改动, 须配并发回归 |
+| ~~P2~~ | ~~同步 `compile()` 缺 in-flight 去重~~ | ✅ **§4.92 已修**: `compiling_keys`+`cache_cv` 去重; 阴性对照实测修复前 8 并发 → 8 次重复编译, 修复后 1 次; `test_c3_compile_dedup` 4 用例覆盖(含同线程重入防死锁/失败不残留标记) | 残留: **同步 vs 异步**交叉去重未做(见待办 #12) |
 | **P2** | 性能测量环境不可控, 小效应量结论不可信 | §4.90: 本机常驻背景负载 >150% CPU, 同配置离散度最大 34%; FFN「C3 快 5~8%」与 §4.88「接管 -2.7%」均落在噪声内 | 需干净窗口重测(见待办 #9); 提交性能结论须附环境与离散度 |
 | **P2** | C3 运行时间方差 > eager(观察, 待确认) | §4.90: 三组独立实验复现 C3 离散 31~34% vs eager 4~7%; 疑因 JIT 编译期对 CPU 争抢敏感 | 干净环境确认(见待办 #10); 若成立属真实特性而非测量噪声 |
 | **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
@@ -266,6 +268,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | 反向 fusion/DEBT | `test_fused_bw_debt2` | fused BW 默认 off, sanity |
 | pgo/错误路径(已修绿) | `test_c3_pgo_deopt` `test_c3_compile_error` | bad_weak_ptr 已修 |
 | 泛化判据层 | `test_fusion_planner` | 29 断言(Default/RegionKernel/代价门/强制合并/ADR-0002 策略/partitionGraph 切分 + 子图边界契约(Const 外部输入 / 分隔符切出 / 跨子图依赖) + **分隔符归属(并入/独立)** + SiLU 归类) |
+| **同步编译去重** | `test_c3_compile_dedup` | §4.92: 并发同 key 只编译一次 + 同线程重入防死锁 + 失败不残留 in-flight + cache 关闭不去重 |
 | forward 整图捕获 | `test_forward_capture` | 真实前向 capture+plan(含 MatMul+SiLU) |
 | deploy 指纹 O(1) 读 | `test_machine_fingerprint` | save/load/桥接/回退 |
 | forward 一致率采集 | `test_c3_mnist_train` + `C3_HOOK_CAPTURE=1` | MNIST fwd 3/3(off-path) |
