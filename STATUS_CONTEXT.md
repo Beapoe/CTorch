@@ -2610,3 +2610,33 @@ FFN loss 序列(5.8210/14533136/131903728/...) 均与改前逐位一致。
 **方法学教训(重要)**: 判断"某功能是否配置"不能只 grep 实现层字面量(PassBuilder);
 本项目的优化管线经 MLIR `OptUtils` 封装, 应查**封装层调用**(`makeOptimizingTransformer`/`transformer` 选项)。
 §4.88 的该条 P2 已从"已知问题"撤回。
+
+**补充验证(同日目标轮) —— 数值一致性 + 归约向量化性精确化**
+
+1. **数值一致性**(目标硬要求)。单一变量 `C3_MLIR_NOOPT`, 同构建(build-release)同轮对照:
+
+| 指标 | 优化开(默认) | 优化关(`C3_MLIR_NOOPT=1`) |
+|---|---|---|
+| MNIST 最终 loss | 0.0985 | 0.0985 |
+| MNIST 最终 acc | 97.1421% | 97.1421% |
+| `test_c3_backward` max_diff | 0 | 0 |
+| `bw_exec_us`(5 epoch 累计) | 351474 | 373522 |
+| epoch 平均 | 222.6ms | 202.7ms |
+
+⇒ 数值**逐位一致**(loss/acc 完全相同, backward max_diff=0), IR 优化管线**不改变数值语义**。
+性能方向与上文一致(优化开 kernel 快 5.9%; 上轮 7 轮交错测 10.1%, 幅度差异在 M3 热降频既有
+波动范围内), 端到端 epoch 仍是优化开略慢(一次性编译开销主导, 同上文 VERDICT 3)。
+回归全绿: `test_c3_graph` 118 / `test_fusion_planner` 29 / `test_forward_capture` 4 /
+`test_machine_fingerprint` 3 / `test_sum_mean_grad` 18 全 PASS。
+
+2. **"SumReduce 标量循环未被向量化"的精确化**(修正 §4.88 该句表述)。
+`SumReduceOpLowering`(`C3DialectLowering.cpp:558`)两分支的向量化性**不同**, 不可一概而论:
+- `axis==0`(行优先, 2026-08-30 已重构): 内层 for-j 为 `out[j] += in[i*N+j]`,
+  每次迭代访问**不同的 out 元素**, 无循环携带依赖 ⇒ **不依赖 fast-math 即可被 LoopVectorize 向量化**;
+  该分支注释"LLVM 可向量化内层 for-j"的前提**成立**。
+- `axis==1`: 内层 for-j 为 `out[i] += in[i*N+j]`, 是**浮点归约**(循环携带依赖),
+  且 lowering 未设置任何 fastmath/reassoc flag(该文件无 `setFastmath` 调用), 走严格 IEEE ⇒
+  LoopVectorize 按代数语义**拒绝**向量化。这是浮点语义的必然结果, **不是管线缺失**。
+⇒ 结论: §4.88 "标量循环实际未被向量化"**仅对 `axis==1` 成立**, 归因是**浮点归约语义**。
+若将来要向量化 axis=1, 正确做法是在 lowering 显式开 reassoc(会改变浮点求和次序,
+属**数值语义变更**, 须按 compiler-flags 协议单独评估), 而**不是**"补 IR 优化管线"。
