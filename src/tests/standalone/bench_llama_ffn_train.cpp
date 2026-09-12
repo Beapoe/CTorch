@@ -33,6 +33,7 @@
 #include "C3/C3BackwardCapture.h"
 #include "C3/C3Config.h"
 #include "C3/C3Cleanup.h"
+#include "bench_guard.h"           // [§4.97 ⑤] 测量环境守卫
 #include "C3/ForwardCapture.h"       // [HOOK] forward 整图捕获(旁路采集)
 #include "C3/FusionPlanner.h"       // [HOOK] 通用融合判据(旁路采集)
 
@@ -116,6 +117,9 @@ int main(int argc, char** argv) {
         BS = (size_t)std::atoll(argv[1]); HID = (size_t)std::atoll(argv[2]);
         INT = (size_t)std::atoll(argv[3]); STEPS = (size_t)std::atoll(argv[4]);
     }
+    // [§4.97 ⑤] 测量环境守卫: 记录每 step 耗时与环境快照, 收尾输出可信度报告
+    benchguard::BenchGuard bench_guard;
+    const std::string bench_label = "FFN";
     const char* env_rf = std::getenv("C3_DISABLE_REGION_FUSION");
     const char* env_hp = std::getenv("C3_DISABLE_HOTPATH");
     std::cout << "=== LLaMA-FFN train (BS=" << BS << " HID=" << HID << " INT=" << INT
@@ -227,6 +231,8 @@ int main(int argc, char** argv) {
         double b = std::chrono::duration_cast<msd>(t2 - t1).count();
         double u2 = std::chrono::duration_cast<msd>(t3 - t2).count();
         fwd_ms += f; bwd_ms += b; upd_ms += u2;
+        // [§4.97 ⑤] 环境守卫: 每 step 记录一次 total 耗时 + 环境快照
+        bench_guard.record(bench_label, f + b + u2);
         if (s >= STEPS - 3 || s < 2) {
             std::cout << std::fixed << std::setprecision(1) << "  step " << s
                       << ": fwd=" << f << "ms bwd=" << b << "ms upd=" << u2
@@ -240,6 +246,9 @@ int main(int argc, char** argv) {
               << "ms  upd=" << upd_ms / STEPS << "ms  total=" << (fwd_ms + bwd_ms + upd_ms) / STEPS
               << "ms/step\n";
     std::cout.flush();
+
+    // [§4.97 ⑤] 环境守卫报告: 离散度/环境快照/可定案判定
+    bench_guard.report(stderr);
 
 #ifndef CT_DISABLE_C3
     {
