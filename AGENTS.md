@@ -56,6 +56,7 @@
 - §4.91 **洛锦审查五条核实**: A1 `FlatOutPool` heap never delete(真债, 待办 #11)、A2 `C3Engine` 单例(刻意设计, 仅记录)、**B3 已修**(`doCompile` 第三参数原为空壳, 同步 compile 单次 miss 路径 key 被重算最多 6 次含全图序列化 → 改一次复用)、B4 同步路径无 in-flight 去重(待办 #12)、**C5 证伪**(`111,111` 是 transA/transB 非 tile; 已提具名常量)。回归全绿 + 缓存统计逐位等价(STATUS 新)
 - §4.92 **同步 compile() in-flight 去重落地**(§4.91 B4): `compiling_keys`(key→owner 线程)+`cache_cv`; 同线程重入不等待(防自死锁)、`enable_cache=false` 不去重、RAII 保证异常路径释放; 新增 `sync_compiles`/`dedup_waits` 统计; **阴性对照** 证明测试有效(去重禁用时 8 线程 → 8 次重复编译, 测试转红); 新增 `test_c3_compile_dedup` 4 用例(STATUS 新)
 - §4.93 **FlatOutPool 进程级常驻清理**(§4.91 A1): 澄清池非"无限涨"而是「涨到峰值后永不释放」; 朴素 atexit **本质不安全**(与静态析构共用 LIFO 队列) → 改为 `drain()` **释放数据、保留结构**(pool/mutex 永不析构, 故清理后 Tensor 析构仍安全) + `draining` 标志防退出阶段重新积累; 接入 `shutdownAll()` 第 6 步; 新增 `getFlatOutPoolStats()` 可观测; 新增 `test_c3_flatout_pool` 4 用例(阴性对照有效)(STATUS 新)
+- §4.94 **自审轮(suliluo-code-review)**: B4/A1/B3 三轮改动未发现正确性缺陷; 发现既有 P2(profiling 分支锁外访问 profile_data, 经对抗审查 P1→P2 降级) + 4 条 P2; 新增 2 个并发压力用例(16T×8key 去重 / 4T×200 交错 drain)(STATUS 新)
 
 **当前性能基线** (M3 Pro / 数值受热降频与背景负载影响):
 > ⚠️ **2026-09-10 复核(§4.90): 以下旧基线未在干净环境确认, 部分复现失败**。
@@ -203,6 +204,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | ~~P2~~ | ~~LLVM IR 优化管线未配置~~ | ✅ **§4.89 已撤回(误报)**: 管线经 `mlir::makeOptimizingTransformer` 已配置且生效(kernel 执行快 5.9~10.1%, 7 轮交错验证); 优化开/关**数值逐位一致**(loss/acc/backward max_diff=0) | 无需修复; 可选见待办 #7 |
 | ~~P2~~ | ~~`FlatOutPool` 内存只进不出(进程级)~~ | ✅ **§4.93 已修**: `drain()` 释放池中已归还 buffer 并接入 `shutdownAll()` 第 6 步; pool/mutex 仍不析构故清理后 Tensor 析构安全; `draining` 标志防重新积累。原审查"一直涨"已修正为「涨到峰值后永不释放」(acquire 复用同 size buffer) | 残留: 未做堆级验证(测试 buffer 仅 8B, 噪声大于量级), 见 STATUS §4.93 |
 | ~~P2~~ | ~~同步 `compile()` 缺 in-flight 去重~~ | ✅ **§4.92 已修**: `compiling_keys`+`cache_cv` 去重; 阴性对照实测修复前 8 并发 → 8 次重复编译, 修复后 1 次; `test_c3_compile_dedup` 4 用例覆盖(含同线程重入防死锁/失败不残留标记) | 残留: **同步 vs 异步**交叉去重未做(见待办 #12) |
+| **P2** | profiling 分支锁外访问 `profile_data`(既有) | §4.94: `compile()` miss 尾部 1266-1273 锁外 find/emplace(5102679 引入); 与已修 P0-4 同模式; 但 `enable_profiling` 默认 false 且唯一开启点是单线程单测 → 当前无并发触发面(对抗审查 P1→P2) | 修复: 移入锁内, 约 3 行, 非紧急 |
 | **P2** | 性能测量环境不可控, 小效应量结论不可信 | §4.90: 本机常驻背景负载 >150% CPU, 同配置离散度最大 34%; FFN「C3 快 5~8%」与 §4.88「接管 -2.7%」均落在噪声内 | 需干净窗口重测(见待办 #9); 提交性能结论须附环境与离散度 |
 | **P2** | C3 运行时间方差 > eager(观察, 待确认) | §4.90: 三组独立实验复现 C3 离散 31~34% vs eager 4~7%; 疑因 JIT 编译期对 CPU 争抢敏感 | 干净环境确认(见待办 #10); 若成立属真实特性而非测量噪声 |
 | **P2** | region 代价判定收益模型 | ~~EXP-2 推翻方案 C 前提~~ §4.83 已澄清: 方案 C(默认合并)方向错, 但 **Strict 判据本身全维度判对**(ws 已建模代码膨胀成本), 收益模型**无需重设计** | 默认维持 Strict; 方案 C 基础设施保留但不推进; max_region_nodes 降级为防御兜底 |
@@ -270,8 +272,8 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | 反向 fusion/DEBT | `test_fused_bw_debt2` | fused BW 默认 off, sanity |
 | pgo/错误路径(已修绿) | `test_c3_pgo_deopt` `test_c3_compile_error` | bad_weak_ptr 已修 |
 | 泛化判据层 | `test_fusion_planner` | 29 断言(Default/RegionKernel/代价门/强制合并/ADR-0002 策略/partitionGraph 切分 + 子图边界契约(Const 外部输入 / 分隔符切出 / 跨子图依赖) + **分隔符归属(并入/独立)** + SiLU 归类) |
-| **MIMO 缓冲池清理** | `test_c3_flatout_pool` | §4.93: 池被使用 → drain 清空 → 幂等 → 恢复缓存 → drain 后迟到析构安全 |
-| **同步编译去重** | `test_c3_compile_dedup` | §4.92: 并发同 key 只编译一次 + 同线程重入防死锁 + 失败不残留 in-flight + cache 关闭不去重 |
+| **MIMO 缓冲池清理** | `test_c3_flatout_pool` | §4.93+§4.94: 池被使用 → drain 清空 → 幂等 → 恢复缓存 → drain 后迟到析构安全 + **执行×drain 并发交错压力** |
+| **同步编译去重** | `test_c3_compile_dedup` | §4.92+§4.94: 并发同 key 只编译一次 + 同线程重入防死锁 + 失败不残留 in-flight + cache 关闭不去重 + **16T×8key 压力** |
 | forward 整图捕获 | `test_forward_capture` | 真实前向 capture+plan(含 MatMul+SiLU) |
 | deploy 指纹 O(1) 读 | `test_machine_fingerprint` | save/load/桥接/回退 |
 | forward 一致率采集 | `test_c3_mnist_train` + `C3_HOOK_CAPTURE=1` | MNIST fwd 3/3(off-path) |

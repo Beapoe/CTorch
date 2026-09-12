@@ -64,6 +64,27 @@ void runMultiNodeGraphAndCheck() {
     EXPECT_FLOAT_EQ(results[0].data_read<float>()[1], 15.0f);
 }
 
+/// 线程安全版本: 执行 multi-node 图并验证数值, 成功返回 true(ASSERT 不能用于子线程)
+bool runMultiNodeGraphVerify() {
+    Graph g;
+    auto in_desc = TensorDesc::fromShape({2, 3});
+    size_t in = g.addInput(in_desc);
+    auto tr_desc = TensorDesc::fromShape({3, 2});
+    size_t tr = g.addNode(TransposeNode{in_desc, 0, 1}, {in}, tr_desc);
+    auto sum_desc = TensorDesc::fromShape({2});
+    size_t sum = g.addNode(SumReduceNode{tr_desc, 0}, {tr}, sum_desc);
+    g.markOutput(sum);
+
+    auto kernel = compileMLIRLocal(g);
+    if (!kernel) return false;
+    Tensor A(ShapeTag{}, {2, 3});
+    for (size_t i = 0; i < A.numel(); ++i) A.data_write<float>()[i] = float(i + 1);
+    auto results = kernel->execute({A});
+    if (results.size() != 1u || results[0].numel() != 2u) return false;
+    return results[0].data_read<float>()[0] == 6.0f &&
+           results[0].data_read<float>()[1] == 15.0f;
+}
+
 } // namespace
 
 // ==================== 池确实被 MIMO 执行使用 ====================
@@ -141,4 +162,34 @@ TEST(FlatOutPool, DrainThenLateTensorDestructionIsSafe) {
     results.clear();                      // 迟到的析构：应走 draining 分支直接 free
     EXPECT_EQ(C3Engine::getFlatOutPoolStats().cached_buffers, 0u)
         << "drain 之后归还的 buffer 不应重新入池";
+}
+
+// ==================== 并发执行 + drain 交错：无 UAF / 无崩溃 ====================
+
+TEST(FlatOutPool, ConcurrentExecuteAndDrainStress) {
+    C3Engine::drainFlatOutPool();  // 干净起点
+
+    constexpr int kThreads = 4;
+    constexpr int kIters = 50;
+    std::atomic<int> ok{0};
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&]() {
+            for (int i = 0; i < kIters; ++i) {
+                if (runMultiNodeGraphVerify()) ok.fetch_add(1);
+            }
+        });
+    }
+
+    // 主线程与执行并发交错 drain: 验证 drain 与 acquire/release 的竞争安全
+    for (int i = 0; i < 200; ++i) {
+        C3Engine::drainFlatOutPool();
+        std::this_thread::sleep_for(std::chrono::microseconds(100));
+    }
+    for (auto& th : threads) th.join();
+
+    EXPECT_EQ(ok.load(), kThreads * kIters)
+        << "并发执行 + 交错 drain 下全部结果必须正确(若出现 UAF 会读到脏数据或崩溃)";
 }

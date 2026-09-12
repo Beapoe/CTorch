@@ -205,3 +205,46 @@ TEST(CompileDedup, FailureDoesNotPoisonInflight) {
     }
     EXPECT_TRUE(finished) << "编译失败后残留 in-flight 标记 → 后续 compile 被永久阻塞";
 }
+
+// ==================== 多 key 高并发压力：无死锁 + 跨线程去重 ====================
+
+TEST(CompileDedup, ConcurrentManyKeysStress) {
+    auto& engine = C3Engine::getInstance();
+    engine.clearCache();
+
+    CompileOptions opts;
+    opts.enable_cache = true;
+
+    const auto before = engine.getCacheStats();
+
+    // 16 线程 × 5 轮 × 8 种不同 size（= 8 个不同 cache key）：
+    // 全程不得死锁、不得崩溃、不得重复编译；首轮后各 key 应已入缓存。
+    constexpr int kThreads = 16;
+    constexpr int kRounds = 5;
+    constexpr int kSizes = 8;
+    std::atomic<int> ok{0};
+
+    std::vector<std::thread> threads;
+    threads.reserve(kThreads);
+    for (int t = 0; t < kThreads; ++t) {
+        threads.emplace_back([&, t]() {
+            for (int r = 0; r < kRounds; ++r) {
+                size_t m = 16 + static_cast<size_t>((t + r) % kSizes) * 8;  // 8 种 shape
+                Graph g = makeMatMulGraph(m, m, m);
+                auto kernel = engine.compile(g, opts);
+                if (kernel) ok.fetch_add(1);
+            }
+        });
+    }
+    for (auto& th : threads) th.join();
+
+    const auto after = engine.getCacheStats();
+
+    EXPECT_EQ(ok.load(), kThreads * kRounds) << "全部调用都应拿到可用内核";
+
+    // 8 个不同 key 每个只应真正编译一次（跨线程去重 + 缓存复用）
+    EXPECT_EQ(after.sync_compiles - before.sync_compiles,
+              static_cast<size_t>(kSizes))
+        << "多 key 并发下每个 key 只应编译一次";
+}
+

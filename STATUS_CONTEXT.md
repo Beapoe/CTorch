@@ -2882,3 +2882,32 @@ MNIST loss 0.0985 acc 97.1421%(逐位不变); `test_c3_mnist_train` 的 `[CLEANU
 堆分配统计的噪声远大于该量级, 无法据此判定"内存确实归还 OS"。本轮在**逻辑层面**验证了
 "池内容被清空"与"drain 失效时测试转红", `std::free` 的实际调用由代码审查确认。
 若要端到端计数, 需构造大输出 MIMO 图并接 `malloc_zone_statistics`, 记为后续可选增强。
+
+
+## 4.94 2026-09-10 自审轮: B4/A1/B3 三轮改动代码审查(协议 suliluo-code-review)
+
+对 §4.91-4.93 三轮改动(c3 d2e512e/dc2eac3/2407d11 + 主仓两个新测试)做作者自审。
+**结论: 本轮三处改动未发现正确性缺陷**; 发现 1 条既有缺陷(P2, 非本轮引入) + 4 条 P2。
+
+**关键发现**
+
+| 等级 | 发现 | 位置 | 处置 |
+|---|---|---|---|
+| P2(原 P1, 经对抗审查降级) | `compile()` miss 路径末尾 profiling 分支锁外访问 `state.profile_data`(find/emplace) | C3Engine.cpp:1266-1273, 5102679 引入(既有) | 待修: 移入锁内(与 hit 路径 1202-1207 一致), 约 3 行, 非紧急 |
+| P2 | 同线程嵌套重入同 key 时内层 guard erase 外层标记 → 中间窗口可多编译一次(无死锁无崩溃, 防自死锁优先的正确权衡) | C3Engine.cpp claim 逻辑 | 注释补充说明(待办) |
+| P2 | 异步完成不 notify `state.cache_cv` → 同步等待者唤醒延迟(不死锁) | compileAsync 完成路径 | 与 #12 交叉去重合并处理 |
+| P2 | `C3CacheStats` 追加字段的 ABI 影响 | C3Engine.h | 源码级构建(C3Core OBJECT 库), 触发条件不成立; 建议补注释 |
+| P2 | 测试失败路径 detach | test_c3_compile_dedup | 诊断场景可接受, 可选改 TearDown join |
+
+**对抗审查**(ADVERSARIAL_SECURITY_PAIR, 子代理独立核实): profiling race 缺陷真实(与已修 P0-4
+「锁外写 state.cache → UB」同模式), 但 `enable_profiling` 默认 false 且全仓唯一开启点为
+test_c3_graph.cpp:2706 的单线程单测 → 当前无并发触发面 → **P1 降级 P2**(防御性缺陷)。
+
+**验证(动态)**
+- 新增压力用例 `test_c3_compile_dedup.ConcurrentManyKeysStress`: 16 线程 × 5 轮 × 8 key,
+  `sync_compiles` 增量恰为 8(每 key 只编译一次), 全部调用成功, 无死锁
+- 新增压力用例 `test_c3_flatout_pool.ConcurrentExecuteAndDrainStress`: 4 线程 × 50 次
+  MIMO 执行 + 主线程 200 次交错 drain, 数值全部正确(无 UAF)
+- 两文件测试均 5/5 PASS; 既有回归全绿
+
+**审查报告**: `/Users/ghostface/skills/reports/2026-09-10/code-review-c3-self-review-b4-a1-b3.md`
