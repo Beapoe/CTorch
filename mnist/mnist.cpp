@@ -268,7 +268,9 @@ int main() {
         int input_size = 784;
         int hidden1 = 256, hidden2 = 128;
         int output_size = 10;
-        float learning_rate = 0.001f;
+        // [Fix 2026-09-10 §4.95 P1-02] CE 反向补 1/N 后, 需按 batch=128 放大 lr
+        // 以维持与修复前相同的有效梯度尺度(修复前有效 lr = 0.001×128 = 0.128)。
+        float learning_rate = 0.128f;
         
         NeuralNetwork model(input_size, hidden1, hidden2, output_size, learning_rate);
         

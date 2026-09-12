@@ -62,7 +62,11 @@ std::vector<GradPack> CrossEntropyNode::backward(const std::vector<Tensor> &down
     }
 #endif
 
-    Tensor grad_logits = grad * diff;
+    // [Fix 2026-09-10 §4.95 P1-02] mean loss(forward 除以 batch_size)的反向必须补 1/N:
+    // 此前缺 1/N, 梯度被隐式放大 N 倍 ⇒ 等效 lr×N。修复后依赖此梯度的训练配置
+    // 需按 N 倍同步调整 lr(见 mnist.cpp: 0.001 → 0.128, 维持与修复前相同的优化轨迹)。
+    const size_t batch = (logits.shape().size() > 0) ? logits.shape()[0] : 1;
+    Tensor grad_logits = grad * diff * (1.0f / static_cast<float>(batch > 0 ? batch : 1));
 
 #ifdef __APPLE__
     if (logits.device() == DeviceType::kMPS) {

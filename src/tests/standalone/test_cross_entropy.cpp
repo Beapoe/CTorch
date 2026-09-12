@@ -163,6 +163,45 @@ int main() {
         ok_oh = ok_oh && grad_ok;
     }
 
+    // [Fix 2026-09-10 §4.95 P1-02] 解析梯度校验: CE(mean) 反向必须 =
+    // (softmax(logits)-target)/batch。此前缺 1/N(梯度被放大 batch 倍), 且双实现
+    // 数值对拍无法发现(两侧一致)。本段为独立数学参照(手工 softmax + 1/N)。
+    {
+        AutoGrad::EnableGrad = true;
+        Tensor lg(ShapeTag{}, {batch, classes}, DType::kFloat, DeviceType::kCPU);
+        float* lp = lg.data_write<float>();
+        for (size_t i = 0; i < batch * classes; ++i) lp[i] = static_cast<float>(i) * 0.3f - 1.0f;
+        lg.requires_grad(true);
+
+        Tensor loss = lg.cross_entropy(target_onehot_cpu);
+        AutoGrad::backward(loss.getRelatedNode(), false);
+        MPS_flush_wait(true);
+        Tensor g = lg.grad();
+
+        bool analytic_ok = (g.numel() == batch * classes);
+        if (analytic_ok) {
+            const float* gp = g.data_read<float>();
+            const float* tp = target_onehot_cpu.data_read<float>();
+            for (size_t i = 0; i < batch; ++i) {
+                float mx = -1e30f;
+                for (size_t j = 0; j < classes; ++j) {
+                    float v = lp[i * classes + j];
+                    if (v > mx) mx = v;
+                }
+                float sum = 0.0f;
+                for (size_t j = 0; j < classes; ++j) sum += std::exp(lp[i * classes + j] - mx);
+                for (size_t j = 0; j < classes; ++j) {
+                    float sm = std::exp(lp[i * classes + j] - mx) / sum;
+                    float ref = (sm - tp[i * classes + j]) / static_cast<float>(batch);
+                    if (!near(gp[i * classes + j], ref, 1e-4f)) analytic_ok = false;
+                }
+            }
+        }
+        std::cout << "CE analytic grad (softmax-target)/N: "
+                  << (analytic_ok ? "MATCH" : "MISMATCH") << std::endl;
+        ok_oh = ok_oh && analytic_ok;
+    }
+
     if (ok_oh && ok_idx) {
         std::cout << "\nAll CrossEntropy checks passed." << std::endl;
         return 0;
