@@ -75,7 +75,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → G3(已默认接管)**: ①-⑨ 全 ✅(§4.83-4.88)。**剩余**: 手写 MIMO pattern 退场(需影子对照独立轮, §4.97 明确记录)。
+1. **通用图融合 → G3(已默认接管)**: ①-⑨ 全 ✅(§4.83-4.88); **手写 MIMO pattern 退场已收口**(§4.103-4.107: 通用树式识别器默认接管, 手写执行段默认关, env 可回退)。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
@@ -162,6 +162,8 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 - `C3_FORCE_REGION_MERGE=1` 强制 region 跨分量合并(跳过代价门, 只验结构等价性; 代价判定后补)
 - `C3_REGION_MERGE_ALLOW=1` **ADR-0002 方案 C**: 跨分量默认合并 + 规模保护(替代相对收益门槛); 默认关=Strict
 - `C3_PARTITION_AB=1` **[实测] A/B: 整图 1 内核 vs 按 planner 切分多内核**(交错 30 轮配对, 需配合 `C3_PLANNER_DIAG=1`)
+- `C3_MIMO_GENERIC` **[通用树式识别器, 默认开 §4.107]**: FC/FFN 反向默认路径(真实拓扑走树+通用构建器+planner/G3 接管); 设 `=0` 关闭回退手写识别器
+- `C3_MIMO_LEGACY` **[手写 MIMO pattern, 默认关 §4.107]**: 已退场; 设 `=1` 恢复手写执行段(诊断/回退)
 - `C3_G3_TAKEOVER` **[G3 接管, 默认开 §4.88]**: planner 判定参与 MIMO backward 执行决策(判拆则切分编排执行, 判并/编译失败回退整图); 设 `=0` 关闭回退到整图单内核
 - `C3_SEPARATOR_MERGE` **[分隔符归属, 默认开 §4.87]**: 分隔符按工作集上界决定并入 region / 独立成内核; 设 `=0` 关闭(回到一律独立)。阈值可 `C3_SEPARATOR_MERGE_WS=<bytes>` 覆盖(默认 1MB)
 - `C3_FINGERPRINT=<path>` 覆盖机器指纹配置路径(默认 ./c3.fingerprint); 由 `c3ctl calibrate` 生成
@@ -295,5 +297,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
   firing MatMul 单图双输出规避 GraphMerger grad 不去重)
   - **FC+FFN 手写 pattern 均已被通用树式识别器等价覆盖(退场预演通过)**
   - MNIST generic=1 与 generic=1+legacy=0 均 0.0985/97.1421%; FFN 两模式 step0 1390.0156
-- 阶段二 v3(依赖已解除, 待做): Tanh/Sigmoid 入通用树白名单(tanh 专项 §4.106 已闭环,
-  恢复 TanhNode) → 浸泡 → 默认切换 legacy=0
+- 阶段二 v3(完成, 4543e23): Tanh/Sigmoid 入白名单 + **默认切换(generic 开 / legacy 关)**;
+  新默认全矩阵逐位不变, 回退通道(旧默认组合)验证完好
+- **④ 完整闭环: 手写 MIMO pattern 正式退场, 通用树式识别器为 FC/FFN 反向默认路径**
+  (手写代码保留, C3_MIMO_GENERIC=0 + C3_MIMO_LEGACY=1 可回退)
