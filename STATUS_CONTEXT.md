@@ -3194,3 +3194,11 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
   test_c3_backward +Test 13/14(Tanh/Sigmoid FC 树捕获端到端) → 121 断言
 - 全量回归逐位不变: 121/max_diff=0/CPU 0 FAIL/MNIST 0.0985+97.1421%/FFN 1390.0156
 - MPS 段崩溃(test_autograd_v2)初判: pre-existing 设备兼容问题, 独立立项待查
+
+
+## 4.108b 2026-09-12 MPS 段崩溃闭环(c3 补提交)
+
+- 根因: C3 backward 执行段缺设备守卫(编译段有), CPU 段预热编译的 kernel 被 MPS 段
+  跨设备命中 → CPU 产物投 MPS 张量相加抛设备不匹配; tryExecuteBackward 入口
+  非 CPU 短路回退 eager
+- test_autograd_v2 全量(CPU+MPS) 172/0 通过; 全量回归逐位不变
