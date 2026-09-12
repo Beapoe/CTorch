@@ -58,6 +58,7 @@
 - §4.93 **FlatOutPool 进程级常驻清理**(§4.91 A1): 澄清池非"无限涨"而是「涨到峰值后永不释放」; 朴素 atexit **本质不安全**(与静态析构共用 LIFO 队列) → 改为 `drain()` **释放数据、保留结构**(pool/mutex 永不析构, 故清理后 Tensor 析构仍安全) + `draining` 标志防退出阶段重新积累; 接入 `shutdownAll()` 第 6 步; 新增 `getFlatOutPoolStats()` 可观测; 新增 `test_c3_flatout_pool` 4 用例(阴性对照有效)(STATUS 新)
 - §4.94 **自审轮(suliluo-code-review)**: B4/A1/B3 三轮改动未发现正确性缺陷; 发现既有 P2(profiling 分支锁外访问 profile_data, 经对抗审查 P1→P2 降级) + 4 条 P2; 新增 2 个并发压力用例(16T×8key 去重 / 4T×200 交错 drain)(STATUS 新)
 - §4.95 **全库全局审查(6 域并行)**: P0 0 / **P1 13** / P2 ~30; 三条 P1 已亲自核实——registry 空 deleter 悬垂、**CE 反向缺 1/N**(C3 对 CE 短路回 eager ⇒ 全链路一致缺陷, 数值对拍不可发现, 修复改变训练行为须 HITL)、Tensor move 弱引用失效; 系统性结论: 空 deleter 别名 shared_ptr 为头号坏味道 + 「两侧一致≠正确」需解析梯度测试; 报告见 skills/reports(STATUS 新)
+- §4.96 **全局审查 13 条 P1 全部修复**(四批: 批1 局部/批2 所有权/批3 CE 1/N 行为变更/批4 复核); 两个自我纠正: P1-03 初版替换节点截断梯度链 → 改 rebind 虚函数; 批3 MNIST 验证假阳性(测试自带 LR 未重编) → 五处 CE 训练点 lr 同步; 最终全量回归绿, MNIST 97.1421% 逐位一致(STATUS 新)
 
 **当前性能基线** (M3 Pro / 数值受热降频与背景负载影响):
 > ⚠️ **2026-09-10 复核(§4.90): 以下旧基线未在干净环境确认, 部分复现失败**。
@@ -193,10 +194,10 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | 级别 | 问题 | 触发/现状 | 建议 |
 |------|------|----------|------|
 | **P0** | 无 | - | - |
-| **P1** | registry 空 deleter 别名 shared_ptr 悬垂 | §4.95: C3Engine.cpp:584/663/793 空 deleter 不持寿命, cache evict(>256) 后 registry 悬垂 → UAF; 现有调用方持返回值故触发窗口窄 | 批2 修复: registry 改 weak_ptr/真实 shared_ptr; 禁空 deleter 别名(项目级约定) |
-| **P1** | **CE 反向缺 1/N 归一化** | §4.95: forward mean loss(/batch), backward 无 1/N ⇒ 等效 lr 隐式 ×batch; C3 对 CE 短路回 eager ⇒ 全链路一致, 数值对拍不可发现; MNIST 简单场景碰巧收敛 | 批3 修复: 补 1/N **须 HITL**(改变训练行为) + lr 同步 + 解析梯度单测 |
-| **P1** | Tensor move 后 GradAccumulator 弱引用失效 | §4.95: Tensor.h:449-487 move 后 initAutogradSelf 重建 _self 控制块, _node 弱引用绑旧块 → 梯度静默丢失(vector 扩容即触发) | 批2 修复: move 后重建 _node + move 梯度单测 |
-| **P1** | 全局审查其余 10 条(子代理证据, 修复时复核) | §4.95: PGO 无锁读 shared_ptr / PGOManager 锁外 string 引用 / DCU 析构硬编码 2 / MultiNode wait 吞异常 / lhs 标量广播越界 / getBroadcastMod 0 双语义 / SIMD 忽略 strides / RegionEntry 裸指针 / 融合无冷却门+future 泄漏 / Arena 永不回收 | 见全局审查报告批1/批2 行动清单 |
+| ~~P1~~ | ~~registry 空 deleter 别名 shared_ptr 悬垂~~ | ✅ §4.96 批2 已修: installIntoRegistry 增 self 参数传真实引用 | - |
+| ~~P1~~ | ~~CE 反向缺 1/N 归一化~~ | ✅ §4.96 批3 已修(洛锦批准行为变更): 补 1/N + 五处 CE 训练点 lr 0.001→0.128; 解析梯度校验 MATCH; MNIST 97.1421% 逐位一致 | - |
+| ~~P1~~ | ~~Tensor move 后 GradAccumulator 弱引用失效~~ | ✅ §4.96 批2+批4 已修: 初版替换节点截断梯度链 → 改 Node::rebind 虚函数原地更新弱引用; sum_mean 多轴梯度回归转红即此, 现已 ALL PASS | - |
+| ~~P1~~ | ~~全局审查其余 10 条~~ | ✅ §4.96 全部修复: PGO atomic 读写 / PGOManager 按值返回 / DCU 容量析构 / MultiNode get 传播 / lhs 广播守卫 / getBroadcastMod 哨兵 / 四内核 strides 物化 / RegionEntry 锁内按值 / 冷却下沉+future 收割 / Arena 非保留图 reset | - |
 | **P1** | 训练期 region fusion 命中因结构而异 | MNIST(FC 带 bias) fused_hit 高; **LLaMA FFN(无 bias) fused_hit=0**(编译了不执行)。但 C3 default 仍最快(~5-10% vs hotpath-off) | 结论: 不是"C3 浪费"; forward 单 kernel + MIMO 已覆盖。训练期 forward fusion 命中是大 forward 结构(FFN)的可选增益。注: 该行"C3 default 最快 ~5-10%"为旧测, §4.90 未复现 |
 | **P1** | sum-loss(非 CE 头)场景若图含无关死分支 | 已修: ComputeCore 活跃子图依赖重算(3085a6b); 正常 CE loss 训练不受影响 | 保留回归 test_sum_mean_grad(18 断言) |
 | **P1** | Stage 5.2 ARM NEON fused 0.77x (反直觉) | x86 AVX-512 + DCU 预期显著加速 | Stage 5.4 DCU 验证 |

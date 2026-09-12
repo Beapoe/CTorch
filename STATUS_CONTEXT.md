@@ -2945,3 +2945,45 @@ wait() 吞 worker 异常 / lhs 标量广播越界(§4.85 只修 rhs 侧) / getBr
 **修复批次**: 批1 局部低风险(06/07/08/09) → 批2 所有权模型(01/03/04/05, 中风险)
 → 批3 HITL 行为变更(02, CE 1/N + lr 调整)。
 **报告**: skills/reports/2026-09-10/code-review-ctorch-global-2026-09-10.md
+
+
+## 4.96 2026-09-10 全局审查 13 条 P1 修复收官(四批次)
+
+§4.95 的 13 条 P1 全部修复完成。按「局部低风险 → 所有权模型 → 行为变更」三批 + 复核批推进:
+
+**批一(局部, c3 0a48fa3)**: P1-06 DCU 缓冲按容量释放/扩容/空输入校验; P1-07 MultiNode
+`wait()`→`get()` 传播 worker 异常; P1-08 buildFused 标量 arg 固定读索引 0(lhs 标量广播
+越界); P1-09 getBroadcastMod 不支持的部分广播返回 `kBroadcastUnsupported` 哨兵,
+lowering 遇哨兵编译失败回退 eager(原与同尺寸共用 0 → 越界读)。
+
+**批二(所有权, c3 6c79ac2 + 主仓 1286886)**: P1-01 installIntoRegistry 增
+`shared_ptr<CompiledKernel> self` 参数, 删除空 deleter 别名(原 cache evict 后 registry
+悬垂 UAF); P1-04 PGO 内核读写走 atomic_load/store 配对; P1-05 lastDeoptReason/
+lastCompileError 按值返回; P1-03 Tensor move 后重建弱引用(初版)。
+
+**批三(行为变更, 主仓 a59d409, 洛锦已批)**: P1-02 CE 反向补 1/N + mnist lr 0.001→0.128;
+解析梯度校验(手工 softmax + 1/N 独立参照)MATCH。
+
+**批四(复核批, c3 129026a/105f7d9 + 主仓 51ecb06)**: P1-10 Tensor 增 is_contiguous()/
+contiguous(), Softmax/CE 四内核入口物化非连续视图; P1-11 RegionFusionRegistry 三接口
+锁内按值返回 optional<RegionEntry>(rehash 悬垂), 调度器 matched_region_ 改按值持有;
+P1-12 冷却检查下沉 submitFusedCompileAsync + reapFinishedFuturesLocked 防 future 泄漏;
+P1-13 ComputeCore::backward 非保留图模式下 reset Arena(块级复用, 内存有界,
+逃生开关 CT_ARENA_NO_RESET=1)。
+
+**过程中的两个重要自我纠正**:
+1. **P1-03 初版修复有缺陷**: 用 createGradAccumulator 替换 _node 会摧毁中间节点类型
+   (如 SumNode) 截断梯度链 → test_sum_mean_grad 多轴梯度断言转红。改为 Node::rebind
+   虚函数原地更新弱引用(保留节点结构与梯度)。教训: 修复"弱引用绑定"类缺陷时,
+   **rebind 而非 replace**。
+2. **批三验证假阳性**: 当时跑 MNIST 用的 test_c3_mnist_train 二进制未重编(仍是
+   批二产物), 97.1421% 是旧行为。本轮发现 test_c3_mnist_train 自带 LR=0.001
+   (不走 mnist.cpp), 同步修正了全部五个 CE 训练点 lr(0.001→0.128, batch=128)。
+   教训: 行为变更类修复必须**重编全部受影响目标**再验证。
+
+**最终回归(全绿)**: graph 118 / sum_mean ALL PASS / planner 29 / forward_capture 4 /
+fingerprint 3 / compile_dedup 5 / flatout_pool 5 / pgo_deopt 7 / compile_error 11 /
+swiglu 全过 / gelu 161 / autograd_issues 12 / backward max_diff=0 /
+MNIST 97.1421%·0.0985(与修复前逐位一致) / FFN CE 与 sum 模式均正常。
+**既有失败(非本轮引入, 留待后续)**: test_cross_entropy 的 index-target 反向形状缺陷
+(§4.95 P2) 与 test_autograd_v2 的 copy 语义/MPS 段问题。
