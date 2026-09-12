@@ -3179,3 +3179,18 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
   逐位不变; 回退通道(旧默认组合)同值验证
 - ④ 完整闭环: 影子对照(阶段一) → 通用识别器 v1/v2 → 白名单补全 v3 → 默认切换;
   手写 MIMO pattern 正式退场, planner/G3 通用线成为唯一默认路径
+
+
+## 4.108 2026-09-12 立即可做四项收口(防回归/树捕获测试/P2/MPS 初判, c3 372b695)
+
+- 根因(Test 14 Sigmoid FC 树捕获 grad_b 3.46 vs eager 0.96, 隔离实验定位):
+  ① 融合 forward(MatMul+Add+Sigmoid)不物化 pre-activation h, Tanh/Sigmoid 反向图
+  旧实现重算 f(h) 读陈旧存储; ② 连带发现 Graph::fuse() 链构建缺陷(FusedNode
+  执行层假设链前驱=inputs[0] 且无 reorder, 构建不保证) → 收紧链延伸条件
+- 修: Tanh/Sigmoid 反向图输入语义改 forward 输出 y(grad*(1-y²)/grad*(y-y²),
+  与 eager/PyTorch 一致); 三处执行喂入(phase1/树/legacy)用 getResult();
+  fuse() 断链; profiling 锁外访问移入锁内(P2 清尾)
+- 防回归: test_c3_graph +3 用例(RegressionMultiNode, §4.106 双缺陷钉死);
+  test_c3_backward +Test 13/14(Tanh/Sigmoid FC 树捕获端到端) → 121 断言
+- 全量回归逐位不变: 121/max_diff=0/CPU 0 FAIL/MNIST 0.0985+97.1421%/FFN 1390.0156
+- MPS 段崩溃(test_autograd_v2)初判: pre-existing 设备兼容问题, 独立立项待查
