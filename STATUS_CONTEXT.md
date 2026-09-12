@@ -3054,3 +3054,29 @@ test_autograd_v2 的 leaky_relu 5 项梯度 FAIL 根因定位与修复:
 grad 输入正确(全 1)、Gt lowering 正确(0/1)、ReLU 反向图正确(Gt×grad),
 但执行产物正数位置 = 0.42(疑 fused 序列跨测试喂入污染)。需运行时调试
 (suliluo-runtime-debugger)或 C3 反向执行层专项排查。
+
+
+## 4.99 2026-09-12 test_autograd_v2 清零 + 批C 两项 + P2 小项
+
+**test_autograd_v2 CPU 段 0 FAIL(① 完成)**:
+- 上轮 relu 2 FAIL 误判澄清: 二分法(单测/前缀组合)实锤 2 个 FAIL 来自 **test_tanh_grad**
+  (relu/lrelu 均正确); tanh 的 C3 反向多节点图执行有缺陷 —— 实测 ga=[1,1,1] 恒等输出,
+  图内 exp/neg/sub 链执行产物全错
+- 止血(c3 6ea388a): TanhNode 暂移出 supportsNodeType 名单 → 回退 eager(正确性优先,
+  与 CE 短路同哲学); 待反向图执行层专项修复后恢复
+- 顺带: buildTanhBackwardGraph 的 Sub(1, tanh²) lhs 标量广播改为 Neg+Add(rhs 标量)
+- 教训: 「打印对、断言错」的排查要怀疑 FAIL 来自**别的测试**(同名断言/宏参数顺序)
+
+**批C 两项(c3 c7ff7ce)**:
+- FFN MIMO 负缓存: 已有内核但执行失败不再重编译(直接回退 eager)
+- G3 退化口径: tryG3TakeoverKernel 增 planner_merged 参数, merged=true 时不接管;
+  两处调用点传 mp.plan.region_metric.merged
+- 第三项(pending 残留回滚 4 点)记入下轮
+
+**P2 小项三项(c3 本轮)**:
+- ForwardCapture first_op 死代码删除
+- reconcile 统计注释修正(DIAG+SHADOW 双路径)
+- MachineFingerprint launch_unit_bytes 合法性校验(损坏值置 0)
+
+**验证**: test_autograd_v2 CPU 0 FAIL; graph 118 / backward max_diff=0 /
+MNIST 97.1421%·0.0985 / FFN MIMO 正常 / fingerprint 3 / forward_capture 4。
