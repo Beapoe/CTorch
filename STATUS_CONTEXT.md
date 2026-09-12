@@ -3080,3 +3080,22 @@ grad 输入正确(全 1)、Gt lowering 正确(0/1)、ReLU 反向图正确(Gt×gr
 
 **验证**: test_autograd_v2 CPU 0 FAIL; graph 118 / backward max_diff=0 /
 MNIST 97.1421%·0.0985 / FFN MIMO 正常 / fingerprint 3 / forward_capture 4。
+
+
+## 4.100 2026-09-12 批C 第三项 + canonicalize 死代码压缩
+
+**pending 回滚(c3 b27bec5)**: 五处异步编译启动点的异常路径修复 ——
+- taskStarted() 失败(shutdown 已启动)时回滚 pending_compiles_ 标记再返回(此前残留
+  永不 erase)
+- std::thread 构造抛 system_error 时回滚 taskFinished + 标记(此前 active_tasks_
+  已增而 TaskGuard 未建 → shutdown() 永久阻塞)
+- 覆盖 per_key×2 / fused_key / mimo_key / ffn_key
+
+**canonicalize 死代码(c3 本轮)**: CanonicalizeRules::defaults() 的 12 条 lambda
+历史恒返回 nullopt(实际匹配硬编码在 canonicalize() 自底向上遍历), 压缩为统一
+占位 + 规则名表。语义零变化。
+
+**验证**: graph 118 / backward max_diff=0 / MNIST 97.1421%·0.0985 / FFN MIMO 正常。
+
+**待办增量**: compileMergedAsync watchdog(文档化取舍) / OrchestratedKernel
+cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图执行层专项。
