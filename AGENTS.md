@@ -59,6 +59,7 @@
 - §4.94 **自审轮(suliluo-code-review)**: B4/A1/B3 三轮改动未发现正确性缺陷; 发现既有 P2(profiling 分支锁外访问 profile_data, 经对抗审查 P1→P2 降级) + 4 条 P2; 新增 2 个并发压力用例(16T×8key 去重 / 4T×200 交错 drain)(STATUS 新)
 - §4.95 **全库全局审查(6 域并行)**: P0 0 / **P1 13** / P2 ~30; 三条 P1 已亲自核实——registry 空 deleter 悬垂、**CE 反向缺 1/N**(C3 对 CE 短路回 eager ⇒ 全链路一致缺陷, 数值对拍不可发现, 修复改变训练行为须 HITL)、Tensor move 弱引用失效; 系统性结论: 空 deleter 别名 shared_ptr 为头号坏味道 + 「两侧一致≠正确」需解析梯度测试; 报告见 skills/reports(STATUS 新)
 - §4.96 **全局审查 13 条 P1 全部修复**(四批: 批1 局部/批2 所有权/批3 CE 1/N 行为变更/批4 复核); 两个自我纠正: P1-03 初版替换节点截断梯度链 → 改 rebind 虚函数; 批3 MNIST 验证假阳性(测试自带 LR 未重编) → 五处 CE 训练点 lr 同步; 最终全量回归绿, MNIST 97.1421% 逐位一致(STATUS 新)
+- §4.97 **P2 批量清理四批 + 交叉去重**: 引擎(原子化/声明清理/PGO 计数锁序) / MLIR+图融合(Div NaN 统一/maximumf/默认映射抛异常/哈希序列化) / 反向捕获(FC 校验/多轴回退/A-B 计数) / kernels+运行时(SIMD 守卫/AMX 真委托/tanh 溢出/UB/RAII/别名/copy 语义); 同步×异步交叉去重补全; 最终全量回归绿(STATUS 新)
 
 **当前性能基线** (M3 Pro / 数值受热降频与背景负载影响):
 > ⚠️ **2026-09-10 复核(§4.90): 以下旧基线未在干净环境确认, 部分复现失败**。
@@ -73,7 +74,7 @@
 ## 🔧 下一步待办 (2026-09-10)
 
 0. **【待测新模式(占位, 细节洛锦稍后补)】**: 当前状态已固化为上述基线; 开测前以本文件"当前状态/已知未解决"为对照, 测完把结果回填回此节。
-1. **通用图融合 → G3(已默认接管)**: ① 维持 Strict ✅ ② ~~收益模型重设计~~ **撤销**(§4.83) ③ 补实验 ✅ ④ 真接管落地 ✅ ⑤ rhs 广播 bug 已修 ✅ ⑥ 影子默认开 ✅ ⑦⑧ 分隔符归属 ✅ ⑨ **接管默认开**(§4.88) ✅。**剩余**: 手写 MIMO pattern 退场。(LLVM IR 优化管线已于 §4.89 验证并撤回误报, 无需修复)
+1. **通用图融合 → G3(已默认接管)**: ①-⑨ 全 ✅(§4.83-4.88)。**剩余**: 手写 MIMO pattern 退场(需影子对照独立轮, §4.97 明确记录)。
 2. **【立项 C·已修 2026-09-10】hotpath SiLU 缺失**: `makeNodeVariant` 已补 `case op::SiLU`(修复 default→Sigmoid 错映射), isSupportedOp/isUnaryOp 掩码已加 SiLU, MatMulActivation 已加 SiLU + epilogue lowering。见 STATUS §4.74。残留仅"无 bias FFN fused_hit=0(编译不执行)"这一既有 P1, 与 SiLU 正确性无关。
 3. ~~batched GEMM 合并~~ → 砍: 特化 + M3 实测合并负收益(-1~10%)。GEMM 决策走部署时自适应校准。
 4. **部署时自适应校准(新设计, 骨架已落地)**: c3ctl+MachineFingerprint 已通(launch 税实测≈12KB); 待把 GEMM 分 shape/线程/opt_level 并入校准 + 指纹扩 JSON。
@@ -90,9 +91,8 @@
     经分析 atexit 方案**本质不安全**(与静态析构共用 LIFO 队列, 无法保证池回调晚于所有 Tensor 析构),
     改为「释放数据、保留结构」的 `drain()` + `shutdownAll()` 接入。**残留(可选)**:
     堆级端到端验证(需构造大输出 MIMO 图 + `malloc_zone_statistics`)。
-12. **~~同步 `compile()` in-flight 去重~~ ✅ 已于 §4.92 完成**。**残留**: 同步 vs 异步
-    交叉去重 —— 同步 `compile()` 遇到 `state.pending` 中同 key 的异步编译时仍会自行编译;
-    需处理 `shared_future` 的等待与异常传播, 风险更高, 单独立项。
+12. **~~同步 `compile()` in-flight 去重~~ ✅ 全部完成(§4.92 + §4.97 交叉去重)**: 同步 vs 同步(B4)
+    与同步 vs 异步(锁外 wait pending future 后重查缓存)两条路径语义已统一。
 
 ## 设计蓝图 (docs/, 多未实现)
 

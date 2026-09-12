@@ -2987,3 +2987,43 @@ swiglu 全过 / gelu 161 / autograd_issues 12 / backward max_diff=0 /
 MNIST 97.1421%·0.0985(与修复前逐位一致) / FFN CE 与 sum 模式均正常。
 **既有失败(非本轮引入, 留待后续)**: test_cross_entropy 的 index-target 反向形状缺陷
 (§4.95 P2) 与 test_autograd_v2 的 copy 语义/MPS 段问题。
+
+
+## 4.97 2026-09-12 全局审查 P2 批量清理(四批) + 交叉去重
+
+§4.95 的 ~30 条 P2 批量清理完成四批, 另补 §4.92 残留的同步×异步交叉去重。
+
+**批A(c3 引擎, 893e543)**: 删 wasAsyncCompileTimedOut 无实现声明; AsyncCompileState
+timed_out → atomic<bool>; shutdown 注释对齐实现(future 析构阻塞等待, 非 abandon);
+PGOManager::clear 不归零 active_compilations_(防 uint64 下溢); promoteAll 快照后锁外
+promote(消 ABBA 锁序)。
+
+**批B(c3 MLIR+图融合, 893e543)**: Div 除零语义跨编译路径统一 NaN(4 处补 select 守卫);
+CE 行 max 归约 maximumf→MaxNumFOp; makeNodeVariant default 由静默 Sigmoid 改抛异常
+fail-fast; buildFusedGraph 外部输入索引只计外部输入; canonicalize 规则 1/2/3 补二元守卫;
+mergedCacheKey 序列化 from/to subgraph; shape_hash 混入全部输入形状。
+
+**批C(c3 反向捕获, f4839fc)**: FC-MIMO installBackward 前 inputCount==4 校验;
+computeReduceAxis 多轴返回 -2 哨兵回退 eager; A/B 对比 outsA 短于 gouts 时剩余输出
+计入 missing(修 PASS 漏检)。**记录待办**: MIMO 负缓存 / G3 退化口径(region_metric.merged)
+/ pending 残留回滚 —— 涉及执行路径语义, 需独立轮。
+
+**批D(主仓 kernels+运行时, 26f1578)**: Exp/Log SIMD 守卫收窄 __AVX__ + 无 AVX x86 分支;
+SiLU_AMX 真委托 SIMD; MPS tanh 对称公式(|x|>88 不再 NaN); CE BASIC 空 batch 返回 0;
+MPSAllocator 指针比较改 uintptr_t(2 处); EnableGrad 恢复改 RAII; GradAccumulator 别名
+检查升级共享 storage 判定; copy grad 语义注释与 test_autograd_v2 copy 断言修正。
+
+**交叉去重(c3 bc021e1)**: compile() 等待循环发现 pending 同 key 异步编译时锁外
+wait future 后重查缓存复用; 异步失败自然落入自行编译。同步 vs 同步(B4)与同步 vs
+异步两条去重语义至此统一。
+
+**最终回归(全绿)**: graph 118 / sum_mean ALL PASS / planner 29 / forward_capture 4 /
+fingerprint 3 / compile_dedup 5 / flatout_pool 5 / pgo_deopt 7 / compile_error 11 /
+swiglu 全过 / gelu 161 / autograd_issues 12 / backward max_diff=0 /
+MNIST 97.1421%·0.0985 逐位一致 / FFN CE+sum 均正常。
+
+**既有遗留(记录待办)**: test_autograd_v2 的 leaky_relu 梯度 5 项 FAIL(梯度传播断链,
+独立调试轮) + MPS 段设备异常; test_cross_entropy index-target 反向形状缺陷。
+
+**未做(明确记录)**: 手写 MIMO pattern 退场 —— 涉及默认执行路径切换, 需影子对照独立轮;
+dot() 反向断链(需按新算子协议); MIMO 负缓存/G3 退化口径/pending 残留(见批C待办)。
