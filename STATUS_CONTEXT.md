@@ -3027,3 +3027,30 @@ MNIST 97.1421%·0.0985 逐位一致 / FFN CE+sum 均正常。
 
 **未做(明确记录)**: 手写 MIMO pattern 退场 —— 涉及默认执行路径切换, 需影子对照独立轮;
 dot() 反向断链(需按新算子协议); MIMO 负缓存/G3 退化口径/pending 残留(见批C待办)。
+
+
+## 4.98 2026-09-12 leaky_relu 梯度断链根因修复(c3 e7e45fe)
+
+test_autograd_v2 的 leaky_relu 5 项梯度 FAIL 根因定位与修复:
+
+**根因**: `supportsNodeType` 用 `find("ReLUNode")` 子串匹配, 而 **"LReLUNode" 本身
+以 "ReLUNode" 结尾**(L 是前缀) → LReLU 被误判为受支持节点: 计入融合序列且 phase1
+命中错误内核, 梯度静默错值。
+
+**调试轨迹(完整闭环)**:
+1. C3_ENABLE_BACKWARD=0 → 0 FAIL ⇒ C3 反向路径元凶
+2. LReLUNode::backward 加打印 → 从未被调用 ⇒ 走了 C3 某路径
+3. 入口短路(支持名单外单输入节点) → 无效 ⇒ 名单判定本身有误
+4. supportsNodeType 改后缀匹配 → 仍命中 ⇒ "LReLUNode" 后缀即 "ReLUNode"
+5. 改完整类名精确匹配(剥 typeid 数字前缀) → lrelu 5 项全过
+6. 逐层打印证明 eager 链正确(kernel 输入/输出/投递全对) ⇒ 修复后零回归
+
+**修复**: supportsNodeType 改 nodeTypeIs 精确匹配; tryExecuteBackward 入口对非名单
+单输入节点短路(防御)。
+
+**验证**: test_autograd_v2 CPU 段 FAIL 5→2; MNIST 97.1421% 逐位不变; 全量回归绿。
+
+**遗留(下一轮)**: 剩余 2 个 FAIL 属 **test_relu_grad** —— C3 反向执行层污染:
+grad 输入正确(全 1)、Gt lowering 正确(0/1)、ReLU 反向图正确(Gt×grad),
+但执行产物正数位置 = 0.42(疑 fused 序列跨测试喂入污染)。需运行时调试
+(suliluo-runtime-debugger)或 C3 反向执行层专项排查。
