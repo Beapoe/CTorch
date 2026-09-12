@@ -3167,3 +3167,15 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
   → computePoolBufCount 抽唯一真源
 - TanhNode 恢复: test_tanh_grad C3 路径梯度与期望全等; **test_autograd_v2 CPU 0 FAIL
   (§4.98 遗留 2 FAIL 关闭)**; 全量回归 118/0/ALL PASS + MNIST/FFN 逐位不变
+
+
+## 4.107 2026-09-12 手写 MIMO pattern 退场收口(④ v3, c3 4543e23)
+
+- 通用树白名单 +Tanh/Sigmoid(执行层缺陷 §4.106 已修); 入口放宽; supportsNodeType
+  恢复 SigmoidNode → test_c3_backward Test 2 / test_autograd_v2 sigmoid 自 C3 路径
+- **默认切换**: C3_MIMO_GENERIC 默认开 + C3_MIMO_LEGACY 默认关 —— 通用树式识别器成为
+  FC/FFN 反向默认路径, 手写 pattern 执行段退场(env 回退通道保留)
+- 验证(新默认): 118/max_diff=0/ALL PASS/CPU 0 FAIL/MNIST 0.0985/97.1421%/FFN 1390.0156
+  逐位不变; 回退通道(旧默认组合)同值验证
+- ④ 完整闭环: 影子对照(阶段一) → 通用识别器 v1/v2 → 白名单补全 v3 → 默认切换;
+  手写 MIMO pattern 正式退场, planner/G3 通用线成为唯一默认路径
