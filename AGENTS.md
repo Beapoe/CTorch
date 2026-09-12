@@ -208,7 +208,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | ~~P1~~ | ~~hotpath SiLU 缺失~~ | ✅ 已修(立项 C, STATUS §4.74): makeNodeVariant/isSupportedOp/isUnaryOp/MatMulActivation + epilogue lowering 全补齐 | 残留仅"无 bias FFN fused_hit=0"这一既有 P1, 与 SiLU 正确性无关 |
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
 | ~~P2~~ | ~~test_autograd_v2 遗留 2 FAIL(tanh 的 C3 反向恒等/错位)~~ | ✅ **§4.106 tanh 专项闭环(c3 4120eef)**: 根因 = buildMultiNodeMLIR 2 槽池 DAG 读写冲突 + elementwise 链融合对 Sub/Div 换位; 修复后 test_tanh_grad C3 路径与期望全等, CPU 0 FAIL, TanhNode 恢复 supportsNodeType | - |
-| **P2** | test_autograd_v2 MPS 段设备异常崩溃 | §4.98 调试中发现: MPS 段 makeTensor(MPS) 后某些测试抛"张量设备类型不匹配"未捕获 → SIGABRT | 独立立项(与 MPS 设备兼容性相关) |
+| ~~P2~~ | ~~test_autograd_v2 MPS 段设备异常崩溃~~ | ✅ **§4.108b 已修**: C3 backward 执行段缺设备守卫(编译段有), CPU 段预热 kernel 被 MPS 段跨设备命中 → CPU 产物投 MPS 张量抛设备不匹配; tryExecuteBackward 入口非 CPU 短路回退 eager; test_autograd_v2 全量(CPU+MPS) 172/0 | - |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
 | **P2** | 泛化融合已默认接管(G3 落地) | **接管默认开**(§4.88), 数值逐位一致(硬结论); 性能: 原记 FFN -2.7~-4.9% 经 §4.90 复核**复现失败**(实测持平) | 性能待干净环境重测(待办 #9); 后续: 手写 MIMO pattern 退场 |
 | ~~P2~~ | ~~MLIR rhs 标量广播 shape 推断 bug~~ | ✅ 已修(§4.85): 根因是 `fuse()` 融合含 rhs 标量广播的链后, fused 路径对标量 arg 越界读; 修复为 `fuse()` 拒绝融合 rhs 标量广播链(不误伤 lhs) | 已闭环; FFN/MNIST 数值逐位不变 |
