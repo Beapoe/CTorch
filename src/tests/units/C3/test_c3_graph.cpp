@@ -1400,6 +1400,80 @@ TEST(RegressionMultiNode, TanhBackwardFullChain) {
     }
 }
 
+// ======================= §4.109 广播向量化 + tiled transpose 回归 =======================
+// A1: 广播二元算子向量化(标量广播 splat / 对齐周期广播连续向量 load);
+// A2: 2D 转置 cache blocking(32x32 tile + tile 边界 min)。
+
+TEST(RegressionMultiNode, VectorizedBroadcastPaths) {
+    using namespace ct::c3;
+    // 对齐周期广播: rhs [8] 广播到 [3,8] → bmod=8(NEON VL=4 时为「>=VL 且整除」
+    // 的新向量化路径; 旧实现全标量)。同时覆盖同尺寸加法。
+    const size_t M = 3, N = 8;
+    Graph g;
+    auto l_d = TensorDesc::fromShape({M, N});
+    auto r_d = TensorDesc::fromShape({N});
+    size_t l = g.addInput(l_d);
+    size_t r = g.addInput(r_d);
+    size_t add = g.addNode(AddNode{l_d, r_d}, {l, r}, l_d);
+    g.markOutput(add);
+
+    auto kernel = compileMLIR(g);
+    ASSERT_NE(kernel, nullptr);
+
+    Tensor lt(ShapeTag{}, {M, N});
+    Tensor rt(ShapeTag{}, {N});
+    std::vector<float> lv, rv;
+    for (size_t i = 0; i < M * N; ++i) lv.push_back(static_cast<float>(i) * 0.5f - 3.0f);
+    for (size_t i = 0; i < N; ++i) rv.push_back(static_cast<float>(i) - 2.0f);
+    fillTensor(lt, lv);
+    fillTensor(rt, rv);
+
+    auto results = kernel->execute({lt, rt});
+    ASSERT_EQ(results.size(), 1u);
+    const float* p = results[0].data_read<float>();
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            const float expect = lv[i * N + j] + rv[j];
+            EXPECT_NEAR(p[i * N + j], expect, 1e-5f) << "i=" << i << " j=" << j;
+        }
+    }
+}
+
+TEST(RegressionMultiNode, TiledTranspose2D) {
+    using namespace ct::c3;
+    // 2D 转置 + 消费者(多节点图 → 走 TransposeOpLowering 的 tiled 路径)。
+    // 40x33: tile(32) 边界 + 多 tile(2x2) + 非整除尺寸, 覆盖 min 边界逻辑与
+    // 内层 i 连续写的索引计算。纯搬运, 数值应逐位一致。
+    const size_t M = 40, N = 33;
+    Graph g;
+    auto in_d = TensorDesc::fromShape({M, N});
+    auto t_d = TensorDesc::fromShape({N, M});
+    size_t in = g.addInput(in_d);
+    size_t tr = g.addNode(TransposeNode{in_d, 0, 1}, {in}, t_d);
+    TensorDesc one_d = TensorDesc::fromShape({1});
+    size_t one = g.addConstant(1.0f, one_d);
+    size_t add = g.addNode(AddNode{t_d, one_d}, {tr, one}, t_d);   // 消费者保多节点
+    g.markOutput(add);
+
+    auto kernel = compileMLIR(g);
+    ASSERT_NE(kernel, nullptr);
+
+    Tensor xt(ShapeTag{}, {M, N});
+    std::vector<float> xv;
+    for (size_t i = 0; i < M * N; ++i) xv.push_back(static_cast<float>(i % 97) * 0.125f - 4.0f);
+    fillTensor(xt, xv);
+
+    auto results = kernel->execute({xt});
+    ASSERT_EQ(results.size(), 1u);
+    const float* p = results[0].data_read<float>();
+    for (size_t i = 0; i < M; ++i) {
+        for (size_t j = 0; j < N; ++j) {
+            const float expect = xv[i * N + j] + 1.0f;   // out[j][i] = in[i][j] + 1
+            EXPECT_NEAR(p[j * M + i], expect, 1e-5f) << "i=" << i << " j=" << j;
+        }
+    }
+}
+
 TEST(MLIRBackend, AddGraphExecute) {
     using namespace ct::c3;
 
