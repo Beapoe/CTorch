@@ -3129,3 +3129,15 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
 - 架构结论: 手写识别器是 G3 编译站点的前置识别, 默认切换前需实现
   通用识别器(执行段 planner 分区缓存) —— 记为退场阶段二
 - 待办: MIMO 退场阶段二(通用识别器) / RC2 / tanh 反向图执行层专项
+
+
+## 4.104 2026-09-12 手写 MIMO 退场阶段二 v1: 通用链式识别器(ADR-012)
+
+- 新增 C3_MIMO_GENERIC(默认关): 通用线性链捕获位于手写识别器之前, miss 透传
+- 走链: 真实拓扑(白名单 {ReLU,Add,MatMul} + 单消费者守卫 + 含 MatMul 即层边界)
+- 恒等梯度(Add 同形)以别名槽共享上游 grad 输出, 规避无算力图 worker 缺陷;
+  生成的 FC 融合图与 legacy 同构(相同子图/构建器/链接)
+- 影子验证(MNIST): generic=1 轨迹与基线全等(0.5436/0.2167/0.1552/0.1210/0.0985);
+  generic=1+legacy=0 纯通用路径同结果 → FC 手写路径可退场(退场预演通过);
+  FFN step0 不变量(1390.0156); 回归: test_c3_graph 118/test_c3_backward 0/test_sum_mean_grad ALL
+- 待办: 阶段二 v2(树拓扑 FFN 捕获 + Tanh/Sigmoid 入白名单) → 浸泡后默认切换 legacy=0
