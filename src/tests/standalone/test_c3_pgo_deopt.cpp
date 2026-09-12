@@ -44,7 +44,8 @@ public:
     [[nodiscard]] const std::string& cacheKey() const override { return name_; }
     [[nodiscard]] DeviceType targetDevice() const override { return DeviceType::kCPU; }
     [[nodiscard]] size_t workspaceBytes() const override { return 0; }
-    bool installIntoRegistry(op, const KernelShapeInfo&) override { return false; }
+    bool installIntoRegistry(op, const KernelShapeInfo&,
+                             std::shared_ptr<CompiledKernel>) override { return false; }
 private:
     std::string name_;
 };
@@ -67,7 +68,8 @@ public:
     [[nodiscard]] const std::string& cacheKey() const override { return name_; }
     [[nodiscard]] DeviceType targetDevice() const override { return DeviceType::kCPU; }
     [[nodiscard]] size_t workspaceBytes() const override { return 0; }
-    bool installIntoRegistry(op, const KernelShapeInfo&) override { return false; }
+    bool installIntoRegistry(op, const KernelShapeInfo&,
+                             std::shared_ptr<CompiledKernel>) override { return false; }
     int callCount() const { return call_count_; }
 private:
     std::string name_;
@@ -85,7 +87,8 @@ public:
     [[nodiscard]] const std::string& cacheKey() const override { return name_; }
     [[nodiscard]] DeviceType targetDevice() const override { return DeviceType::kCPU; }
     [[nodiscard]] size_t workspaceBytes() const override { return 0; }
-    bool installIntoRegistry(op, const KernelShapeInfo&) override { return false; }
+    bool installIntoRegistry(op, const KernelShapeInfo&,
+                             std::shared_ptr<CompiledKernel>) override { return false; }
 private:
     std::string name_;
 };
@@ -225,7 +228,7 @@ int main() {
         }
 
         // last_deopt_reason 应包含 "ofast:"
-        auto& reason = kernel.lastDeoptReason();
+        auto reason = kernel.lastDeoptReason();  // [§4.95 P1-05] 现为按值返回
         if (reason.find("ofast") == std::string::npos) {
             std::cout << "  FAIL [2]: lastDeoptReason 应包含 'ofast': " << reason << "\n";
             ++failed;
@@ -341,7 +344,7 @@ int main() {
 
         kernel.execute(inputs);
 
-        auto& reason = kernel.lastDeoptReason();
+        auto reason = kernel.lastDeoptReason();  // [§4.95 P1-05] 现为按值返回
         bool has_tier = reason.find("ofast") != std::string::npos;
         bool has_msg = reason.find("simulated crash") != std::string::npos;
 

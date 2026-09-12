@@ -351,6 +351,32 @@ void test_memory_tensor_move_grad() {
     EXPECT(d.grad().numel() == 2, "Moved tensor should retain grad");
 }
 
+// [Fix §4.95 P1-03] move 后 GradAccumulator 的 weak_ptr 必须指向新控制块:
+// move 之后再 backward, 梯度应正常写回 moved 张量。
+// (修复前 weak_ptr 绑旧控制块 → lock() 失败 → 梯度静默丢失)
+void test_tensor_move_then_backward() {
+    AutoGrad::EnableGrad = true;
+    Tensor a = makeTensor({1.0f, 2.0f});
+    a.requires_grad(true);
+    Tensor b = makeTensor({10.0f, 20.0f});
+    b.requires_grad(true);
+
+    // 模拟容器扩容触发的 move 链
+    std::vector<Tensor> sink;
+    sink.push_back(std::move(a));
+    Tensor moved_a = std::move(sink[0]);
+
+    Tensor c = moved_a + b;
+    AutoGrad::backward(c.getRelatedNode(), false);
+    syncDevice(g_device);
+
+    EXPECT(moved_a.grad().numel() == 2, "moved tensor should receive grad after backward");
+    if (moved_a.grad().numel() == 2) {
+        EXPECT_NEAR_F(moved_a.grad().data_read<float>()[0], 1.0f, kEps);
+        EXPECT_NEAR_F(moved_a.grad().data_read<float>()[1], 1.0f, kEps);
+    }
+}
+
 void test_tensor_to_same_device() {
     Tensor a = makeTensor({1.0f, 2.0f, 3.0f});
     a.requires_grad(true);
@@ -439,6 +465,7 @@ void run_all_tests() {
     test_memory_tensor_copy_grad_independence();
     test_memory_arena_clear();
     test_memory_tensor_move_grad();
+    test_tensor_move_then_backward();
     test_tensor_to_same_device();
     test_tensor_to_dtype();
     test_tensor_to_cross_device_and_back();

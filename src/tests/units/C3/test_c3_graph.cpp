@@ -1090,7 +1090,7 @@ TEST(C3HotReplace, InstallAndDispatch) {
     shapes.lhs_shape = {4};
     shapes.rhs_shape = {4};
     shapes.out_shape = {4};
-    bool installed = kernel->installIntoRegistry(op::Add, shapes);
+    bool installed = kernel->installIntoRegistry(op::Add, shapes, kernel);
     EXPECT_TRUE(installed);
 
     // 3. 通过调度器 dispatch（模板版本，内部会查询 C3 注册表）
@@ -1133,7 +1133,7 @@ TEST(C3HotReplace, MulDispatch) {
     shapes.lhs_shape = {3, 3};
     shapes.rhs_shape = {3, 3};
     shapes.out_shape = {3, 3};
-    kernel->installIntoRegistry(op::Mul, shapes);
+    kernel->installIntoRegistry(op::Mul, shapes, kernel);
 
     Tensor a(ShapeTag{}, {3, 3});
     Tensor b(ShapeTag{}, {3, 3});
@@ -1163,7 +1163,7 @@ TEST(C3HotReplace, RollbackOnUninstall) {
     auto& engine = C3Engine::getInstance();
     auto kernel = engine.compile(g, {});
     KernelShapeInfo shapes{{4}, {4}, {4}};
-    kernel->installIntoRegistry(op::Add, shapes);
+    kernel->installIntoRegistry(op::Add, shapes, kernel);
 
     // 第一次 dispatch — 走 C3
     Tensor a(ShapeTag{}, {4});
@@ -1204,7 +1204,7 @@ TEST(C3HotReplace, ShapeMismatchFallback) {
     auto& engine = C3Engine::getInstance();
     auto kernel = engine.compile(g, {});
     KernelShapeInfo shapes{{4}, {4}, {4}};
-    kernel->installIntoRegistry(op::Add, shapes);
+    kernel->installIntoRegistry(op::Add, shapes, kernel);
 
     // 用不同形状 {6} 调用 — 应回退到 eager
     Tensor a(ShapeTag{}, {6});
@@ -1242,7 +1242,7 @@ TEST(C3HotReplace, StatsAccuracy) {
     auto& engine = C3Engine::getInstance();
     auto kernel1 = engine.compile(g, {});
     KernelShapeInfo shapes{{4}, {4}, {4}};
-    kernel1->installIntoRegistry(op::Add, shapes);
+    kernel1->installIntoRegistry(op::Add, shapes, kernel1);
 
     // 第二个
     Graph g2;
@@ -1251,7 +1251,7 @@ TEST(C3HotReplace, StatsAccuracy) {
     size_t c = g2.addNode(MulNode{desc, desc}, {a, b}, desc);
     g2.markOutput(c);
     auto kernel2 = engine.compile(g2, {});
-    kernel2->installIntoRegistry(op::Mul, shapes);
+    kernel2->installIntoRegistry(op::Mul, shapes, kernel2);
 
     auto stats1 = C3KernelRegistry::getInstance().getStats();
     EXPECT_EQ(stats1.active_entries, 2u);
@@ -1880,7 +1880,7 @@ TEST(MLIRBackend, HotReplaceInstallAndDispatch) {
 
     // 安装 MLIR 编译的 kernel 到 C3 注册表
     KernelShapeInfo shapes{{4}, {4}, {4}};
-    bool installed = kernel->installIntoRegistry(op::Add, shapes);
+    bool installed = kernel->installIntoRegistry(op::Add, shapes, kernel);
     EXPECT_TRUE(installed);
 
     Tensor a(ShapeTag{}, {4});
@@ -1910,7 +1910,7 @@ TEST(MLIRBackend, HotReplaceUninstallFallback) {
     ASSERT_NE(kernel, nullptr);
 
     KernelShapeInfo shapes{{4}, {4}, {4}};
-    kernel->installIntoRegistry(op::Add, shapes);
+    kernel->installIntoRegistry(op::Add, shapes, kernel);
 
     Tensor a(ShapeTag{}, {4});
     Tensor b(ShapeTag{}, {4});
