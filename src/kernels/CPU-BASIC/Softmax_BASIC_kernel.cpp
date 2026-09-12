@@ -38,8 +38,11 @@ CT_HOT Tensor Softmax_BASIC_kernel(const Tensor &a, int dim) {
     }
     size_t softmax_dim = static_cast<size_t>(d);
 
-    Tensor result(ShapeTag{}, shape, a.dtype(), a.device(), false);
-    const float* CT_RESTRICT in = a.data_read<float>();
+    // [Fix 2026-09-10 §4.95 P1-10] 非连续视图先物化(与 SIMD 版一致)
+    Tensor work = a.is_contiguous() ? a : a.contiguous();
+
+    Tensor result(ShapeTag{}, shape, work.dtype(), work.device(), false);
+    const float* CT_RESTRICT in = work.data_read<float>();
     float* CT_RESTRICT out      = result.data_write<float>();
 
     size_t outer_size = 1;

@@ -51,7 +51,7 @@ int main() {
     float* oh = one_hot.data_write<float>();
     for (int i = 0; i < BS; ++i) oh[i * 10 + (i % 10)] = 1.0f;
 
-    const float LR = 0.001f;
+    const float LR = 0.128f;
 
     for (int step = 0; step < 1; ++step) {
         Tensor z1 = x.matmul(W1) + b1;

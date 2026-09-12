@@ -380,4 +380,12 @@ void ComputeCore::backward(std::shared_ptr<Node> root, bool retainGraph) {
 #endif
 
     AutoGrad::EnableGrad = original_enable_grad;
+
+    // [Fix 2026-09-10 §4.95 P1-13] 非保留图模式下, 本轮计算图已被 clearRecursive 释放,
+    // 此时 reset Arena 安全(运行节点析构器 + block offset 归零复用, 内存有界)。
+    // 保留图模式下不 reset(图仍被引用, reset 会复用其节点内存 → UAF)。
+    // 逃生开关 CT_ARENA_NO_RESET=1 可关闭(特殊场景: 外部持有 Arena 分配对象跨轮使用)。
+    if (!retainGraph && std::getenv("CT_ARENA_NO_RESET") == nullptr) {
+        Arena::getInstance().reset();
+    }
 }

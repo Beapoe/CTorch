@@ -101,7 +101,7 @@ using hires = std::chrono::high_resolution_clock;
 using msd = std::chrono::duration<double, std::milli>;
 
 static size_t BS = 128, HID = 4096, INT = 11008, STEPS = 12;
-static const float LR = 0.001f;
+static const float LR = 0.128f;
 
 static void fill(Tensor& t, float seed) {
     float* p = t.data_write<float>();

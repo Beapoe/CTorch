@@ -165,6 +165,18 @@ public:
         return result;
     }
 
+    /**
+     * @brief [Fix §4.95 P1-03 修正] move 后原地更新输出弱引用(不替换节点本身)
+     * @details Tensor move 会用 this 重建 _self 控制块, 而本节点持有的弱引用仍绑旧块。
+     *          替代方案(用 createGradAccumulator 替换 _node)会摧毁中间节点的真实类型
+     *          (如 SumNode), 截断梯度链。rebind 只更新绑定, 保留节点结构与梯度数据。
+     *          同时重置 _result_owner(其指向 moved-from 地址, 已失效)。
+     */
+    virtual void rebind(const std::weak_ptr<Tensor>& result) {
+        _result = result;
+        _result_owner.reset();
+    }
+
     /** @brief 设置输出张量的强引用所有者，防止反向传播时result被释放 */
     void setResultOwner(std::shared_ptr<Tensor> owner) {
         _result_owner = std::move(owner);

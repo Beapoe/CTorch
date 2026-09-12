@@ -187,7 +187,7 @@ int main() {
     mps_p.W3 = cpu_p.W3.to(DeviceType::kMPS); mps_p.W3.requires_grad(true);
     mps_p.b3 = cpu_p.b3.to(DeviceType::kMPS); mps_p.b3.requires_grad(true);
 
-    float lr = 0.001f;
+    float lr = 0.128f;
 
     std::cout << "=== Single MNIST training step (CPU vs MPS) ===" << std::endl;
 

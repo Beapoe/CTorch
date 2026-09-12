@@ -155,6 +155,13 @@ class Tensor {
     static std::shared_ptr<Node> createGradAccumulator(const std::shared_ptr<Tensor>& self);
 
     /**
+     * @brief [§4.95 P1-03] move 后原地 rebind 节点弱引用(实现见 Tensor.cpp;
+     *        Node 在此处为不完整类型, 成员调用必须下沉到 .cpp)
+     */
+    static void rebindAutogradNode(const std::shared_ptr<Node>& node,
+                                   const std::shared_ptr<Tensor>& self);
+
+    /**
      * @brief 计算步幅 (基于行优先顺序)
      */
     void computeStrides();
@@ -453,12 +460,13 @@ class Tensor {
           _storage(std::move(other._storage)), _shape(std::move(other._shape)),
           _lazy(std::move(other._lazy)) {
         initAutogradSelf();
-        // [Fix 2026-09-10 §4.95 P1-03] move 后重建 _node: initAutogradSelf() 用 this
-        // 重建了 _self 控制块, 而 move 来的 _node(GradAccumulator) 内 weak_ptr 仍绑旧块,
-        // 旧块引用归零 → backward 时 lock() 失败 → 梯度静默丢失(vector 扩容即触发)。
-        // GradAccumulator 无内部状态(梯度存 meta), 重建不丢梯度。
-        if (_autograd_meta._requires_grad) {
-            _autograd_meta._node = createGradAccumulator(_autograd_meta._self);
+        // [Fix 2026-09-10 §4.95 P1-03] move 后原地 rebind _node 的弱引用:
+        // initAutogradSelf() 用 this 重建了 _self 控制块, 而 move 来的 _node 内
+        // weak_ptr 仍绑旧块(旧块引用归零 → lock() 失败 → 梯度静默丢失)。
+        // 注意不能替换节点: _node 可能是中间节点(SumNode 等), 替换成
+        // GradAccumulator 会截断梯度链(§4.95 P1-03 修正)。
+        if (_autograd_meta._node) {
+            rebindAutogradNode(_autograd_meta._node, _autograd_meta._self);
         }
         other.tensor_id_ = 0;
         other._shape.clear();
@@ -484,9 +492,9 @@ class Tensor {
             _lazy             = std::move(other._lazy);
             _autograd_meta    = std::move(other._autograd_meta);
             initAutogradSelf();
-            // [Fix 2026-09-10 §4.95 P1-03] 同 move 构造: 重建 _node 使弱引用绑定新控制块
-            if (_autograd_meta._requires_grad) {
-                _autograd_meta._node = createGradAccumulator(_autograd_meta._self);
+            // [Fix 2026-09-10 §4.95 P1-03] 同 move 构造: rebind 而非替换(见上)
+            if (_autograd_meta._node) {
+                rebindAutogradNode(_autograd_meta._node, _autograd_meta._self);
             }
 
             other.tensor_id_ = 0;
@@ -790,6 +798,19 @@ class Tensor {
      * @throw std::runtime_error 如果转置操作不支持
      */
     Tensor transpose(int dim0, int dim1) const;
+
+    /**
+     * @brief [§4.95 P1-10] 是否行优先连续(步长 == 紧凑布局)
+     * @details 视图操作(transpose/slice)会产生非连续 strides; 若干内核
+     *          (Softmax/CrossEntropy) 此前忽略 strides 线性寻址 → 错读。
+     *          strides 信息缺失时视为连续(与历史行为一致)。
+     */
+    [[nodiscard]] bool is_contiguous() const;
+
+    /**
+     * @brief [§4.95 P1-10] 物化为连续张量; 已连续则返回自身(浅拷贝)
+     */
+    [[nodiscard]] Tensor contiguous() const;
 
     /**
      * @brief 转置张量（二维情况）

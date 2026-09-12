@@ -633,7 +633,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
                 std::vector<size_t> out_shape = computeOutputShape(op_type, inputs, num_inputs);
                 if (out_shape.empty()) {
                     prewalk_state_ = PrewalkState::kIdle;
-                    matched_region_ = nullptr;
+                    matched_region_.reset();
                     prewalk_external_inputs_.clear();
                     return std::nullopt;
                 }
@@ -642,7 +642,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
                 for (const auto& t : prewalk_external_inputs_) {
                     if (!t.data_read<float>()) {
                         prewalk_state_ = PrewalkState::kIdle;
-                        matched_region_ = nullptr;
+                        matched_region_.reset();
                         prewalk_external_inputs_.clear();
                         return std::nullopt;
                     }
@@ -690,7 +690,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
                     }
                     // 恢复状态
                     prewalk_state_ = PrewalkState::kIdle;
-                    matched_region_ = nullptr;
+                    matched_region_.reset();
                     prewalk_external_inputs_.clear();
 
                     if (kernel_result.storage().empty()) {
@@ -725,7 +725,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
                     return kernel_result;
                 } catch (...) {
                     prewalk_state_ = PrewalkState::kIdle;
-                    matched_region_ = nullptr;
+                    matched_region_.reset();
                     prewalk_external_inputs_.clear();
                     return std::nullopt;
                 }
@@ -752,7 +752,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
         } else {
             // op 不匹配 region 序列 → 回退
             prewalk_state_ = PrewalkState::kFallback;
-            matched_region_ = nullptr;
+            matched_region_.reset();
             prewalk_external_inputs_.clear();
             return std::nullopt;
         }
@@ -761,7 +761,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
     // --- kFallback: 回退到 eager ---
     if (prewalk_state_ == PrewalkState::kFallback) {
         prewalk_state_ = PrewalkState::kIdle;
-        matched_region_ = nullptr;
+        matched_region_.reset();
         prewalk_external_inputs_.clear();
         // 继续走下面的"末尾 op 匹配"路径
     }
@@ -779,7 +779,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
                 first_input_shapes.push_back(&inputs[0].shape());
             }
 
-            auto* region = registry.findRegionByFirstOp(op_type, first_input_shapes);
+            auto region = registry.findRegionByFirstOp(op_type, first_input_shapes);
             // [forward 诊断] 打印每个首次出现的首个-op(MatMul) 形状与 region 命中/活跃状态，
             // 用于核对 L1(784→256) 与 L2(256→128) 是否都被注册为融合 region。
             static const bool fwd_mm_diag = []{ auto* e = std::getenv("C3_FWD_DIAG"); return e && std::string(e) == "1"; }();
@@ -822,7 +822,7 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
                 std::vector<size_t> ph_shape = computeOutputShape(op_type, inputs, num_inputs);
                 if (ph_shape.empty()) {
                     prewalk_state_ = PrewalkState::kFallback;
-                    matched_region_ = nullptr;
+                    matched_region_.reset();
                     prewalk_external_inputs_.clear();
                     return std::nullopt;
                 }
@@ -890,12 +890,12 @@ std::optional<Tensor> CtorchScheduler::tryRegionDispatch(
     }
 
     // 向后匹配:从最长可能长度到最短
-    ct::c3::RegionEntry* match = nullptr;
+    std::optional<ct::c3::RegionEntry> match;
     for (size_t len = std::min<size_t>(current_pos + 1, 8); len >= 2 && !match; --len) {
         size_t start = current_pos + 1 - len;
         uint64_t op_hash = ct::c3::RollingHash::getSubHash(extended_prefix, start, current_pos);
         uint64_t full_hash = op_hash ^ (shape_hash << 32);
-        auto* candidate = registry.find(full_hash);
+        auto candidate = registry.find(full_hash);
         if (candidate && candidate->active && candidate->len == len) {
             match = candidate;
             break;
@@ -1034,7 +1034,7 @@ void CtorchScheduler::resetRegionFusion() {
     prewalk_state_ = PrewalkState::kIdle;
     prewalk_cache_count_ = 0;
     prewalk_cache_head_ = 0;
-    matched_region_ = nullptr;
+    matched_region_.reset();
     prewalk_pos_ = 0;
     prewalk_external_inputs_.clear();
     cached_region_ = nullptr;

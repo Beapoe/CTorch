@@ -39,12 +39,15 @@ CT_HOT Tensor Softmax_SIMD_kernel(const Tensor& a, int dim) {
         return Tensor();
     }
 
+    // [Fix 2026-09-10 §4.95 P1-10] 非连续视图(transpose/slice)的 strides 此前被忽略
+    // (线性寻址错读), 先物化再计算
+    Tensor work = a.is_contiguous() ? a : a.contiguous();
+    const auto& shape = work.sizes();
     Tensor result(ShapeTag{}, a.sizes(), a.dtype(), a.device(), false);
-    const float* src = a.data_read<float>();
+    const float* src = work.data_read<float>();
     float* dst = result.data_write<float>();
-    const auto& shape = a.sizes();
 
-    if (a.numel() == 0) return result;
+    if (work.numel() == 0) return result;
 
     size_t outer = 1;
     for (int i = 0; i < actual_dim; ++i) outer *= shape[i];

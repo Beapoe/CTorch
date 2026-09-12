@@ -355,6 +355,55 @@ Tensor Tensor::transpose(int dim0, int dim1) const {
     return result;
 }
 
+bool Tensor::is_contiguous() const {
+    if (_strides.empty() || _strides.size() != _shape.size()) {
+        return true;  // 无 stride 信息 → 视为连续(与历史行为一致)
+    }
+    size_t acc = 1;
+    for (size_t i = _shape.size(); i-- > 0;) {
+        if (_strides[i] != acc) return false;
+        acc *= _shape[i];
+    }
+    return true;
+}
+
+Tensor Tensor::contiguous() const {
+    if (is_contiguous()) return *this;
+
+    // [Fix 2026-09-10 §4.95 P1-10] 按 strides 逐元素物化(含 _storage_offset)。
+    // 仅支持 float/double(Softmax/CE 内核同此限制)。
+    Tensor result(ShapeTag{}, _shape, _dtype, _device, false);
+    const size_t n = numel();
+    if (n == 0) return result;
+    std::vector<size_t> coord(_shape.size(), 0);
+
+    auto materialize = [&](auto* dst, const auto* src) {
+        for (size_t lin = 0; lin < n; ++lin) {
+            size_t off = 0;
+            for (size_t d = 0; d < coord.size(); ++d) off += coord[d] * _strides[d];
+            dst[lin] = src[off];
+            for (int d = static_cast<int>(coord.size()) - 1; d >= 0; --d) {
+                if (++coord[d] < _shape[d]) break;
+                coord[d] = 0;
+            }
+        }
+    };
+
+    if (_dtype == DType::kDouble) {
+        materialize(result.data_write<double>(), _storage.data<double>() + _storage_offset);
+    } else {
+        materialize(result.data_write<float>(), _storage.data<float>() + _storage_offset);
+    }
+    return result;
+}
+
+// [Fix 2026-09-10 §4.95 P1-03] move 后原地 rebind 节点弱引用(虚函数, 派发到
+// GradAccumulator::rebind 或 Node::rebind 基类默认实现)
+void Tensor::rebindAutogradNode(const std::shared_ptr<Node>& node,
+                                const std::shared_ptr<Tensor>& self) {
+    if (node) node->rebind(self);
+}
+
 // 转置张量（二维情况）
 Tensor Tensor::t() const { return transpose(0, 1); }
 

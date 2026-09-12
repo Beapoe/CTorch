@@ -35,8 +35,12 @@ CT_HOT Tensor CrossEntropy_SIMD_kernel(const Tensor& a, const Tensor& b) {
                          "CPU-SIMD CrossEntropy_Kernel: 张量数据类型不一致");
     }
 
-    const float* CT_RESTRICT data_a = a.data_read<float>();
-    const float* CT_RESTRICT data_b = b.data_read<float>();
+    // [Fix 2026-09-10 §4.95 P1-10] 非连续视图(transpose/slice)先物化,
+    // 此前线性寻址忽略 strides 会错读
+    Tensor work_a = a.is_contiguous() ? a : a.contiguous();
+    Tensor work_b = b.is_contiguous() ? b : b.contiguous();
+    const float* CT_RESTRICT data_a = work_a.data_read<float>();
+    const float* CT_RESTRICT data_b = work_b.data_read<float>();
     float cross_entropy = 0.0f;
 
     if (a.numel() == 0) {

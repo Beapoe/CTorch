@@ -27,7 +27,7 @@ using namespace ct;
 static constexpr size_t BATCH_SIZE = 128;
 static constexpr size_t HIDDEN1    = 256;
 static constexpr size_t HIDDEN2    = 128;
-static constexpr float  LR         = 0.001f;
+static constexpr float  LR         = 0.128f;
 static constexpr int    EPOCHS     = 2;
 
 static inline double now_ms() {

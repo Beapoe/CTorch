@@ -187,7 +187,9 @@ class CtorchScheduler{
     const PrewalkEntry& prewalkAt(size_t logical_idx) const {
         return prewalk_cache_[(prewalk_cache_head_ + logical_idx) & kPrewalkCacheMask];
     }
-    ct::c3::RegionEntry* matched_region_ = nullptr;
+    // [Fix 2026-09-10 §4.95 P1-11] 按值持有: registry 返回裸指针在后台 install
+    // rehash 后失效(悬垂), 改为锁内拷贝出的 optional<RegionEntry>
+    std::optional<ct::c3::RegionEntry> matched_region_;
     size_t prewalk_pos_ = 0;  // 当前预走到的位置（在 region 的 op_seq 中）
     // [Prewalk] 缓存 region 执行所需的 external inputs（按 dispatch 顺序追加）
     std::vector<Tensor> prewalk_external_inputs_;
