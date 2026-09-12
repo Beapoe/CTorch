@@ -1295,6 +1295,111 @@ static std::shared_ptr<ct::c3::CompiledKernel> compileMLIR(
     return ct::c3::C3Engine::getInstance().compile(g, opts);
 }
 
+// ======================= §4.106 防回归: 多节点生成层双缺陷 =======================
+// tanh 专项挖出的两个「图结构一变就静默错值」缺陷:
+//   1. 2 槽中间缓冲池 round-robin 在 DAG 下读写冲突(后写覆盖前写)
+//   2. elementwise 链融合「前驱换位 inputs[0]」对非交换算子 Sub/Div 反转操作数
+// 以隔离复现的最小图形态固化为解析断言, 防再引入。
+
+TEST(RegressionMultiNode, DualExpSubDAG) {
+    using namespace ct::c3;
+    // G4c 形态: sub(exp(x), exp(-x))。exp_x/exp_nx 是同一消费者的两个中间输入
+    // (池冲突面), sub 非交换且前驱 exp_nx 在 inputs[1](链融合换位面)。
+    Graph g;
+    auto d = TensorDesc::fromShape({4});
+    size_t x = g.addInput(d);
+    size_t exp_x = g.addNode(ExpNode{d}, {x}, d);
+    size_t neg_x = g.addNode(NegNode{d}, {x}, d);
+    size_t exp_nx = g.addNode(ExpNode{d}, {neg_x}, d);
+    size_t sub = g.addNode(SubNode{d, d}, {exp_x, exp_nx}, d);
+    g.markOutput(sub);
+
+    auto kernel = compileMLIR(g);
+    ASSERT_NE(kernel, nullptr);
+
+    Tensor xv(ShapeTag{}, {4});
+    fillTensor(xv, {0.0f, 1.0f, -1.0f, 2.0f});
+    auto results = kernel->execute({xv});
+    ASSERT_EQ(results.size(), 1u);
+    const float* xp = xv.data_read<float>();
+    const float* p = results[0].data_read<float>();
+    for (size_t i = 0; i < 4; ++i) {
+        const float expect = std::exp(xp[i]) - std::exp(-xp[i]);
+        EXPECT_NEAR(p[i], expect, 1e-5f) << "i=" << i;
+    }
+}
+
+TEST(RegressionMultiNode, TanhValueChain) {
+    using namespace ct::c3;
+    // G4 形态: tanh(x) = (e^x - e^-x) / (e^x + e^-x)。div 的前驱 add 在 inputs[1],
+    // 链融合换位会产出 coth(x) = 分母/分子(§4.106 实测指纹)。
+    Graph g;
+    auto d = TensorDesc::fromShape({4});
+    size_t x = g.addInput(d);
+    size_t exp_x = g.addNode(ExpNode{d}, {x}, d);
+    size_t neg_x = g.addNode(NegNode{d}, {x}, d);
+    size_t exp_nx = g.addNode(ExpNode{d}, {neg_x}, d);
+    size_t sub = g.addNode(SubNode{d, d}, {exp_x, exp_nx}, d);
+    size_t add = g.addNode(AddNode{d, d}, {exp_x, exp_nx}, d);
+    size_t div = g.addNode(DivNode{d, d}, {sub, add}, d);
+    g.markOutput(div);
+
+    auto kernel = compileMLIR(g);
+    ASSERT_NE(kernel, nullptr);
+
+    Tensor xv(ShapeTag{}, {4});
+    fillTensor(xv, {0.0f, 1.0f, -1.0f, 0.5f});
+    auto results = kernel->execute({xv});
+    ASSERT_EQ(results.size(), 1u);
+    const float* xp = xv.data_read<float>();
+    const float* p = results[0].data_read<float>();
+    for (size_t i = 0; i < 4; ++i) {
+        const float expect = std::tanh(xp[i]);
+        EXPECT_NEAR(p[i], expect, 1e-5f) << "i=" << i;
+    }
+}
+
+TEST(RegressionMultiNode, TanhBackwardFullChain) {
+    using namespace ct::c3;
+    // §4.106 原始复现形态: 完整 tanh 反向链 grad * (1 - tanh(x)^2),
+    // 10 计算节点 + rhs 标量 Add(1.0)。覆盖双缺陷 + 恒等输出 [1,1,1] 的根症状。
+    Graph g;
+    auto d = TensorDesc::fromShape({4});
+    size_t grad_in = g.addInput(d);
+    size_t x_in = g.addInput(d);
+    size_t exp_x = g.addNode(ExpNode{d}, {x_in}, d);
+    size_t neg_x = g.addNode(NegNode{d}, {x_in}, d);
+    size_t exp_nx = g.addNode(ExpNode{d}, {neg_x}, d);
+    size_t sub = g.addNode(SubNode{d, d}, {exp_x, exp_nx}, d);
+    size_t add = g.addNode(AddNode{d, d}, {exp_x, exp_nx}, d);
+    size_t div = g.addNode(DivNode{d, d}, {sub, add}, d);
+    size_t sq = g.addNode(MulNode{d, d}, {div, div}, d);
+    size_t neg_sq = g.addNode(NegNode{d}, {sq}, d);
+    TensorDesc one_d = TensorDesc::fromShape({1});
+    size_t one = g.addConstant(1.0f, one_d);
+    size_t one_minus = g.addNode(AddNode{d, one_d}, {neg_sq, one}, d);
+    size_t result = g.addNode(MulNode{d, d}, {grad_in, one_minus}, d);
+    g.markOutput(result);
+
+    auto kernel = compileMLIR(g);
+    ASSERT_NE(kernel, nullptr);
+
+    Tensor gv(ShapeTag{}, {4});
+    Tensor xv(ShapeTag{}, {4});
+    fillTensor(gv, {1.0f, 1.0f, 1.0f, 2.0f});
+    fillTensor(xv, {0.0f, 1.0f, -1.0f, 0.5f});
+    auto results = kernel->execute({gv, xv});
+    ASSERT_EQ(results.size(), 1u);
+    const float* gp = gv.data_read<float>();
+    const float* xp = xv.data_read<float>();
+    const float* p = results[0].data_read<float>();
+    for (size_t i = 0; i < 4; ++i) {
+        const float t = std::tanh(xp[i]);
+        const float expect = gp[i] * (1.0f - t * t);
+        EXPECT_NEAR(p[i], expect, 1e-5f) << "i=" << i;
+    }
+}
+
 TEST(MLIRBackend, AddGraphExecute) {
     using namespace ct::c3;
 

@@ -690,6 +690,80 @@ int main() {
                   << (max_diff < 1e-4 ? "  ✅" : "  ❌") << std::endl;
     }
 
+    // ========== Test 13/14: Tanh/Sigmoid FC 反向(通用树白名单回归, §4.107) ==========
+    // 覆盖: supportsNodeType(Tanh/Sigmoid) → generic 树捕获(白名单 Tanh/Sigmoid/Add/MatMul)
+    // → 多节点反向图执行层(§4.106 双根因修复)。y = act(x @ W + b) 的 x/W/b 三梯度对拍 eager。
+    {
+        auto runActFC = [&](const char* label, bool use_tanh) {
+            std::cout << "\n[" << label << "] FC backward (tree capture)" << std::endl;
+            const size_t B = 4, IN = 3, OUT = 2;
+
+            auto build = [&](Tensor& x, Tensor& W, Tensor& b, Tensor& y) {
+                float* xp = x.data_write<float>();
+                for (size_t i = 0; i < x.numel(); ++i) xp[i] = (static_cast<float>(i) - 5.0f) * 0.25f;
+                x.requires_grad(true);
+                float* wp = W.data_write<float>();
+                for (size_t i = 0; i < W.numel(); ++i) wp[i] = (static_cast<float>(i) - 2.5f) * 0.3f;
+                W.requires_grad(true);
+                float* bp = b.data_write<float>();
+                for (size_t i = 0; i < b.numel(); ++i) bp[i] = static_cast<float>(i) * 0.1f - 0.1f;
+                b.requires_grad(true);
+                Tensor h = x.matmul(W) + b;
+                y = use_tanh ? h.tanh() : h.sigmoid();
+            };
+
+            // eager 参照
+            Tensor ex(ShapeTag{}, {B, IN}, DType::kFloat, DeviceType::kCPU);
+            Tensor eW(ShapeTag{}, {IN, OUT}, DType::kFloat, DeviceType::kCPU);
+            Tensor eb(ShapeTag{}, {OUT}, DType::kFloat, DeviceType::kCPU);
+            Tensor ey;
+            build(ex, eW, eb, ey);
+            AutoGrad::backward(ey.getRelatedNode(), false);
+            auto egx = ex.grad(), egW = eW.grad(), egb = eb.grad();
+
+            double max_diff = 0.0;
+            auto cmpGrad = [&](const Tensor& got, const Tensor& ref, const char* what) {
+                const float* gp = got.data_read<float>();
+                const float* rp = ref.data_read<float>();
+                double d = 0.0;
+                for (size_t i = 0; i < got.numel(); ++i) {
+                    double dd = std::fabs(static_cast<double>(gp[i]) - static_cast<double>(rp[i]));
+                    if (dd > d) d = dd;
+                }
+                max_diff = std::max(max_diff, d);
+                std::cout << "    grad_" << what << " max_diff=" << d << std::endl;
+                if (d > 1e-4) {
+                    std::cout << "      [DBG] got=";
+                    for (size_t i = 0; i < got.numel() && i < 6; ++i) std::cout << gp[i] << " ";
+                    std::cout << " ref=";
+                    for (size_t i = 0; i < ref.numel() && i < 6; ++i) std::cout << rp[i] << " ";
+                    std::cout << std::endl;
+                }
+            };
+
+            for (int iter = 0; iter < 6; ++iter) {
+                Tensor x(ShapeTag{}, {B, IN}, DType::kFloat, DeviceType::kCPU);
+                Tensor W(ShapeTag{}, {IN, OUT}, DType::kFloat, DeviceType::kCPU);
+                Tensor b(ShapeTag{}, {OUT}, DType::kFloat, DeviceType::kCPU);
+                Tensor y;
+                build(x, W, b, y);
+                AutoGrad::backward(y.getRelatedNode(), false);
+                cmpGrad(x.grad(), egx, "x");
+                cmpGrad(W.grad(), egW, "W");
+                cmpGrad(b.grad(), egb, "b");
+                if (iter == 2) {
+                    std::cout << "  Iter 2 → 等待异步编译 (3.5s)..." << std::endl;
+                    std::this_thread::sleep_for(std::chrono::milliseconds(3500));
+                }
+            }
+            overall_max_diff = std::max(overall_max_diff, max_diff);
+            std::cout << "  " << label << " max_diff=" << max_diff
+                      << (max_diff < 1e-4 ? "  ✅" : "  ❌") << std::endl;
+        };
+        runActFC("Test 13 Tanh", /*use_tanh=*/true);
+        runActFC("Test 14 Sigmoid", /*use_tanh=*/false);
+    }
+
     // 安全退出
     ct::c3::shutdownAll();
 
