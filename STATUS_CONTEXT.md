@@ -3109,3 +3109,13 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
   报告 min/median/mean/CV; CV>15% 自动标注不可定案(§4.90 纪律工程化);
   示范接入 bench_llama_ffn_train(实测 CV 7.1% 可定案)
 - 待办剩余: MIMO 退场 / dot 反向 / RC2 / tanh 反向图执行层专项
+
+
+## 4.102 2026-09-12 dot() 反向断链修复(⑥)
+
+- 新增 DotNode(include/AutoGrad/Nodes/DotNode.h + src/AutoGrad/Nodes/DotNode.cpp):
+  dot(x,w) 反向 grad_x = g*w / grad_w = g*x, 逐元素实现(避免 0D 标量进 kernel)
+- AutoGrad.h 双输入 dispatch 补 op::Dot 分支(此前无分支 → 节点不注册 → 断链)
+- 回归 test_sum_mean_grad 增 5 项 dot 断言, ALL PASS
+- 全量回归绿(MNIST 97.1421% 逐位不变, autograd_v2 CPU 0 FAIL)
+- 待办剩余: MIMO 退场 / RC2 / tanh 反向图执行层专项
