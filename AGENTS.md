@@ -290,8 +290,9 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 <!-- MIMO-RETIRE -->
 - 阶段一(完成, c50c796): C3_MIMO_LEGACY 影子对照设施 + 数据
   (MNIST 逐位一致; FFN step0 逐位一致; 性能代价 ≈1% 噪声级)
-- 阶段二 v1(完成, 9401c6f, ADR-012): 通用链式识别器 C3_MIMO_GENERIC(默认关)
-  - 线性链 {ReLU,Add,MatMul} + 别名槽(规避无算力图缺陷) + planner/G3 同口径
-  - MNIST generic=1 与基线全等; generic=1+legacy=0 纯通用同结果(FC 退场预演通过)
-- 阶段二 v2(未开始): 树拓扑(FFN SwiGLU)捕获 + Tanh/Sigmoid 入白名单;
-  就绪后浸泡 → 默认切换 legacy=0
+- 阶段二 v1(完成, 9401c6f): 通用链式识别器(线性链 {ReLU,Add,MatMul} + 别名槽)
+- 阶段二 v2(完成, e5f07d5): 通用树式识别器(白名单 +SiLU/Mul; firing 放宽 ReLU/MatMul;
+  firing MatMul 单图双输出规避 GraphMerger grad 不去重)
+  - **FC+FFN 手写 pattern 均已被通用树式识别器等价覆盖(退场预演通过)**
+  - MNIST generic=1 与 generic=1+legacy=0 均 0.0985/97.1421%; FFN 两模式 step0 1390.0156
+- 阶段二 v3(未开始): Tanh/Sigmoid 入白名单(依赖 tanh 执行层专项) → 浸泡 → 默认切换 legacy=0
