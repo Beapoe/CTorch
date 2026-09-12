@@ -3141,3 +3141,15 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
   generic=1+legacy=0 纯通用路径同结果 → FC 手写路径可退场(退场预演通过);
   FFN step0 不变量(1390.0156); 回归: test_c3_graph 118/test_c3_backward 0/test_sum_mean_grad ALL
 - 待办: 阶段二 v2(树拓扑 FFN 捕获 + Tanh/Sigmoid 入白名单) → 浸泡后默认切换 legacy=0
+
+
+## 4.105 2026-09-12 手写 MIMO 退场阶段二 v2: 通用树式识别器(e5f07d5)
+
+- 链→树泛化: firing 放宽 ReLU/MatMul; 白名单加 SiLU/Mul; BFS 走树(MatMul 叶子=层边界)
+- firing MatMul 建单图双输出子图: 实测两子图各声明 grad 输入时 GraphMerger 不去重
+  → 外部输入+1 与 registry 喂入约定冲突; 槽位模型泛化为全局输出槽(每子图可多输出)
+- 影子验证: FFN generic=1 step0 1390.0156 逐位一致; **generic=1+legacy=0 纯通用树路径
+  同结果(G3 切 2 子图接管) → FFN 手写路径可退场**; MNIST generic=1 与
+  generic=1+legacy=0 均 0.0985/97.1421%; 回归 118/0/ALL PASS
+- ④ 完整收口: FC+FFN 手写 pattern 均已被通用树式识别器等价覆盖(退场预演通过);
+  默认切换 legacy=0 待浸泡(多轮 shadow + 跨测试矩阵)后执行
