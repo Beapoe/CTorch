@@ -2911,3 +2911,37 @@ test_c3_graph.cpp:2706 的单线程单测 → 当前无并发触发面 → **P1 
 - 两文件测试均 5/5 PASS; 既有回归全绿
 
 **审查报告**: `/Users/ghostface/skills/reports/2026-09-10/code-review-c3-self-review-b4-a1-b3.md`
+
+
+## 4.95 2026-09-10 全库全局代码审查(6 域并行, 协议 suliluo-code-review)
+
+六个并行子审查域覆盖全库约 4 万行(引擎/MLIR/图融合/反向捕获/主仓运行时/kernels),
+**P0 0 / P1 13 / P2 ~30**。三条 P1 经父代理亲自核实(F0 闭合), 其余按子代理证据标记。
+
+**已核实的三条 P1**
+1. **registry 空 deleter 别名 shared_ptr 悬垂**(C3Engine.cpp:584/663/793): P0-4 修复注释
+   声称"shared_ptr 持寿命"实际空 deleter 不持寿命; cache evict(>256)/clearCache 后
+   registry 悬垂 → 后续 dispatch UAF。现有调用方(test)均持有返回值, 触发窗口窄, 但系
+   统性坏味道。
+2. **CE 反向缺 1/N**(CrossEntropyNode.cpp:57-65): forward mean loss /batch, backward 无 1/N。
+   **关键交叉发现**: C3 的 buildCrossEntropyBackwardGraph 注释自证「不可达, CE 短路回 eager」
+   → MNIST 的 CE 反向走的就是这条路径, 等效 lr 隐式 ×batch 仍收敛, 数值对拍无法发现
+   (两侧一致)。**修复改变训练行为, 须 HITL + lr 同步**。
+3. **Tensor move 后 GradAccumulator 弱引用失效**(Tensor.h:449-487): move 后 initAutogradSelf
+   重建 _self 新控制块, _node 内 weak_ptr 绑旧块 → lock() 失败 → 梯度静默丢失。
+   与 #1 同族(空 deleter 别名控制块)。
+
+**其余 10 条 P1**(子代理 F0/F1/F2, 修复时复核): PGO 无锁读 shared_ptr /
+PGOManager 持锁返回 string 引用 / DCU 缓冲析构硬编码 2 + 无空输入校验 / MultiNode
+wait() 吞 worker 异常 / lhs 标量广播越界(§4.85 只修 rhs 侧) / getBroadcastMod 0 双语义
+(部分广播静默错读) / Softmax+CE SIMD 忽略 strides(非连续视图静默错读) / RegionEntry
+裸指针 rehash 悬垂 / 训练期融合无冷却门+future 泄漏(为已知"FFN fused_hit=0 每 batch
+重复编译"提供机制解释) / Arena 永不回收(长训 OOM)。
+
+**系统性结论**: ①「空 deleter 别名 shared_ptr」是全库头号坏味道(P1-01/03 同族),
+建议项目级约定禁止(除 weak 引用控制块这一明确用途); ②「两侧一致」不等于正确 ——
+数值对拍只能证一致性, 需补解析梯度数学参照测试; ③ 反向捕获域(最大域)反而最干净(0 P1)。
+
+**修复批次**: 批1 局部低风险(06/07/08/09) → 批2 所有权模型(01/03/04/05, 中风险)
+→ 批3 HITL 行为变更(02, CE 1/N + lr 调整)。
+**报告**: skills/reports/2026-09-10/code-review-ctorch-global-2026-09-10.md
