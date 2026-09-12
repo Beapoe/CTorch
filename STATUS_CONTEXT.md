@@ -3202,3 +3202,18 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
   跨设备命中 → CPU 产物投 MPS 张量相加抛设备不匹配; tryExecuteBackward 入口
   非 CPU 短路回退 eager
 - test_autograd_v2 全量(CPU+MPS) 172/0 通过; 全量回归逐位不变
+
+
+## 4.109 2026-09-12 C3 codegen 质量优化 A1/A2(审查驱动)
+
+- 触发: codegen 质量审查发现 A1(广播二元算子全标量 + remui 阻碍自动向量化)/
+  A2(2D 转置裸双层循环列式写, cache 反复失效)
+- A1: 三支向量化(同尺寸/标量广播 splat/对齐周期广播连续向量 load), 共用向量 body,
+  消除重复 Div 守卫
+- A2: 32x32 tile + min 边界 + 内层 i 连续写(两侧 stride 访问收敛 L1)
+- 验证: 123 断言(新增 2 用例) + 全矩阵逐位不变; IR 指纹确认(49 处向量 fadd +
+  insertelement splat; tile=32 + intr.smin 四层嵌套)
+- 诚实记录: A2 在当前 benchmark 不可达(transA/B folding 吸收 transpose), 收益面向
+  注意力类显式转置场景; A1/A2 性能量化待安静窗口
+- 审查剩余项(未做): A3 MatMul tile 写死 32 且 AutoTuner 默认关 / A4 分支 DAG 元素链
+  回退标量 / Transpose 非 0-1 轴分支为恒等拷贝(占位)
