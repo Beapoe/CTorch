@@ -287,3 +287,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | deploy 指纹 O(1) 读 | `test_machine_fingerprint` | save/load/桥接/回退 |
 | forward 一致率采集 | `test_c3_mnist_train` + `C3_HOOK_CAPTURE=1` | MNIST fwd 3/3(off-path) |
 | FFN forward 一致率采集 | `bench_llama_ffn_train` + `C3_HOOK_CAPTURE=1` | FFN fwd nodes=14, 1×GEMM_EPILOGUE(MatMul+SiLU)+3×GEMM(off-path) |
+<!-- MIMO-RETIRE -->
+- 阶段一(已完成, c50c796): C3_MIMO_LEGACY 影子对照设施 + 数据
+  (MNIST 逐位一致; FFN step0 逐位一致; 性能代价 ≈1% 噪声级)
+- 阶段二(未开始): 执行段 planner 分区缓存通用识别器; 就绪后切换默认 legacy=0
