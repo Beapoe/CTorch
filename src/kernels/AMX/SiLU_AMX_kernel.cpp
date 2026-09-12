@@ -26,15 +26,9 @@ Tensor SiLU_AMX_kernel(const Tensor& a) {
                           "CPU-AMX SiLU_Kernel: 仅在CPU支持");
     }
 
-    Tensor result(ShapeTag{}, a.sizes(), a.dtype(), a.device(), false);
-
-    size_t count = a.numel();
-    const float* a_data = a.data_read<float>();
-    float* result_data = result.data_write<float>();
-
-    // AMX 降级: 标量 fallback (跟 GELU_AMX_kernel 一致, 避免 AMX 误标最快路径)
-    for (size_t i = 0; i < count; ++i) {
-        result_data[i] = silu_scalar(a_data[i]);
-    }
-    return result;
+    // [Fix §4.95 P2] 注释称"直接调用 SIMD kernel"实为标量 exp 循环(潜在 ~10x 退化陷阱);
+    // 改为真正委托 SIMD(与 GELU_AMX 降级范式一致)
+    CtorchError::log(ErrorLevel::WARN, ErrorPlatform::kAMX, ErrorType::DEVICE_COMPAT,
+                      "AMX SiLU_Kernel: 无专用实现，降级到 SIMD");
+    return SiLU_SIMD_kernel(a);
 }

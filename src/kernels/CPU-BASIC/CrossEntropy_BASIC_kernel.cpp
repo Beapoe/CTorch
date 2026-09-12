@@ -31,6 +31,10 @@ CT_HOT Tensor CrossEntropy_BASIC_kernel(const Tensor& a, const Tensor& b) {
     Tensor work_b = b.is_contiguous() ? b : b.contiguous();
     const float* CT_RESTRICT data_a = work_a.data_read<float>();
     const float* CT_RESTRICT data_b = work_b.data_read<float>();
+    // [Fix §4.95 P2] 空 batch 提前返回 0(与 SIMD 版一致; 原 0/0 产 NaN)
+    if (work_a.numel() == 0 || work_b.numel() == 0) {
+        return Tensor(0.0f);
+    }
     
     float cross_entropy = 0.0f;
     

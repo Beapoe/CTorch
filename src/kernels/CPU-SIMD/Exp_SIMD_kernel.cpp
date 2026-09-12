@@ -32,7 +32,7 @@ CT_HOT Tensor Exp_SIMD_kernel(const Tensor& a) {
     const float* CT_RESTRICT a_data = a.data_read<float>();
     float* CT_RESTRICT result_data = result.data_write<float>();
 
-#ifdef __x86_64__
+#if defined(__x86_64__) && defined(__AVX__)
     size_t i = 0;
     // Intel 编译器 / GCC + SVML：使用硬件加速的 _mm256_exp_ps
     #if defined(__INTEL_COMPILER) || (defined(__GNUC__) && defined(__AVX__) && defined(__SVML__))
@@ -54,6 +54,10 @@ CT_HOT Tensor Exp_SIMD_kernel(const Tensor& a) {
         x = std::max(x, -87.0f);
         result_data[i] = std::exp(x);
     }
+#elif defined(__x86_64__)
+    // [Fix §4.95 P2] 无 AVX 的 x86: 原无条件引用仅 __AVX__ 声明的 exp256_ps 会编译失败;
+    // 走通用 vexp(内部含标量兜底)
+    ct::kernels::simd::vexp(a_data, result_data, count);
 #elif defined(__aarch64__)
     // Apple Silicon / ARM64: 调用 SIMDMath 的 exp_neon_f32（4-wide）
     size_t i = 0;

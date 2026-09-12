@@ -63,7 +63,10 @@ extern "C" id<MTLBuffer> MPS_getBuffer(void* ptr) {
     for (auto& pair : impl->bufferMap) {
         void* base = pair.first;
         id<MTLBuffer> buffer = pair.second;
-        if (ptr >= base && ptr < static_cast<char*>(base) + [buffer length]) {
+        // [Fix §4.95 P2] 无关系 void* 的 < 比较为 UB, 改 uintptr_t 整数比较
+        uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
+        uintptr_t b = reinterpret_cast<uintptr_t>(base);
+        if (p >= b && p < b + [buffer length]) {
             return buffer;
         }
     }
@@ -99,7 +102,10 @@ extern "C" void MPS_markBufferModified(void* ptr, size_t bytes) {
     for (auto& pair : impl->bufferMap) {
         void* base = pair.first;
         id<MTLBuffer> buffer = pair.second;
-        if (ptr >= base && ptr < static_cast<char*>(base) + [buffer length]) {
+        // [Fix §4.95 P2] 无关系 void* 的 < 比较为 UB, 改 uintptr_t 整数比较
+        uintptr_t p = reinterpret_cast<uintptr_t>(ptr);
+        uintptr_t b = reinterpret_cast<uintptr_t>(base);
+        if (p >= b && p < b + [buffer length]) {
             size_t offset = static_cast<char*>(ptr) - static_cast<char*>(base);
             [buffer didModifyRange:NSMakeRange(offset, bytes)];
             return;

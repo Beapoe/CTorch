@@ -150,7 +150,12 @@ void ComputeCore::backward(std::shared_ptr<Node> root, bool retainGraph) {
     } guard{prev_in_backward};
 #endif
 
-    bool original_enable_grad = AutoGrad::EnableGrad;
+    // [Fix §4.95 P2] EnableGrad 恢复改 RAII: 原异常路径下 thread_local 永久 false
+    // (不再记录计算图); in_backward 已有 FlagGuard 同款模式
+    struct EnableGradGuard {
+        bool prev;
+        ~EnableGradGuard() { AutoGrad::EnableGrad = prev; }
+    } eg_guard{AutoGrad::EnableGrad};
     AutoGrad::EnableGrad = false;
 
     // [BW-SEG 2026-08-27] env C3_BW_SEG=1：量化 backward 编排各段，定位非 MIMO 的 ~36ms/epoch
@@ -379,7 +384,7 @@ void ComputeCore::backward(std::shared_ptr<Node> root, bool retainGraph) {
     ct::c3::C3BackwardCapture::getInstance().clearCallScopedState();
 #endif
 
-    AutoGrad::EnableGrad = original_enable_grad;
+    // EnableGrad 由 eg_guard 析构恢复(RAII, §4.95 P2)
 
     // [Fix 2026-09-10 §4.95 P1-13] 非保留图模式下, 本轮计算图已被 clearRecursive 释放,
     // 此时 reset Arena 安全(运行节点析构器 + block offset 归零复用, 内存有界)。

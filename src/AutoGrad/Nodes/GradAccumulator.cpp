@@ -76,7 +76,11 @@ std::vector<GradPack> GradAccumulator::backward(const std::vector<Tensor>& downS
                 float* g = tensor->grad_ptr();
                 const float* a = accumulated.data_read<float>();
                 const size_t n = accumulated.numel();
-                if (g != a && n == tensor->numel()) {
+                // [Fix §4.95 P2] 别名检查由指针相等升级为共享 storage 判定:
+                // 视图(同 storage 不同 offset)重叠时原地累加会互相污染
+                bool same_storage = (accumulated.storage().data<float>() ==
+                                     tensor->storage().data<float>());
+                if (!same_storage && g != a && n == tensor->numel()) {
                     size_t i = 0;
 #if defined(__x86_64__) || defined(__i386__)
                     #if defined(__AVX512F__) && defined(__AVX512DQ__)

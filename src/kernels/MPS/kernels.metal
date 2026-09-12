@@ -138,9 +138,12 @@ kernel void tanh_kernel(device float* a [[buffer(0)]],
                         device float* result [[buffer(1)]],
                         uint idx [[thread_position_in_grid]]) {
     float x = a[idx];
-    float exp_x = exp(x);
-    float exp_neg_x = exp(-x);
-    result[idx] = (exp_x - exp_neg_x) / (exp_x + exp_neg_x);
+    // [Fix §4.95 P2] 原 (e^x-e^-x)/(e^x+e^-x) 在 |x|>88 时 inf/inf=NaN;
+    // 改对称公式: e^-2|x| 不溢出, t 大时 → ±1(与 CPU 侧 std::tanh/clamp 饱和一致)
+    float t = fabs(x);
+    float e = exp(-2.0f * t);
+    float th = (1.0f - e) / (1.0f + e);
+    result[idx] = (x < 0.0f) ? -th : th;
 }
 
 kernel void log_kernel(device float* a [[buffer(0)]],

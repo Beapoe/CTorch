@@ -318,15 +318,20 @@ void test_memory_tensor_copy_grad_independence() {
     AutoGrad::backward(c.getRelatedNode(), false);
     syncDevice(g_device);
     Tensor a_copy = a;
-    auto grad_before = a.grad().data_read<float>();
-    auto grad_copy_before = a_copy.grad().data_read<float>();
-    EXPECT(grad_before[0] == grad_copy_before[0], "Initial grads should be equal");
+    // [Fix §4.95 P2] 拷贝构造语义: 拷贝不共享 grad(独立张量各自累积)。
+    // 旧断言期望共享(读空数据 UB, 该测试此前恒红即此), 修正为语义一致的断言
+    // 注: grad() 对空 _grad 会返回零填充张量(numel 同 shape), 用 grad_ptr() 探测真实存储
+    EXPECT(a_copy.grad_ptr() == nullptr, "copy should not share grad");
     Tensor d = a_copy * makeTensor({2.0f, 3.0f});
     AutoGrad::backward(d.getRelatedNode(), false);
     syncDevice(g_device);
+    // a 不参与 d 的图, 其梯度保持不变; a_copy 独立累积 [2,3]
     auto grad_after = a.grad().data_read<float>();
-    auto grad_copy_after = a_copy.grad().data_read<float>();
-    EXPECT(grad_after[0] != grad_copy_after[0], "Grads should be independent after copy");
+    EXPECT(grad_after[0] == 1.0f && grad_after[1] == 1.0f, "original grad unchanged after copy");
+    EXPECT(a_copy.grad().numel() == 2 &&
+           std::fabs(a_copy.grad().data_read<float>()[0] - 2.0f) < 1e-5f &&
+           std::fabs(a_copy.grad().data_read<float>()[1] - 3.0f) < 1e-5f,
+           "copy accumulates its own grad [2,3]");
 }
 
 void test_memory_arena_clear() {

@@ -1434,7 +1434,8 @@ class Tensor {
 
     /**
      * @brief 浅拷贝：共享底层 storage（零数据拷贝），保留 requires_grad 状态，但**不深拷贝 grad**。
-     * @note 普通拷贝构造会对 requires_grad 张量深拷其 grad（`_grad->clone()`，如权重 W 的 grad 3.2MB），
+     * @note [Fix §4.95 P2] 拷贝构造不深拷 grad(现代语义: 拷贝为独立张量, 各自按需
+     *       累积, 见拷贝构造 `_grad = nullptr`)。此前注释声称深拷与实际语义矛盾,
      *       在 prewalk 占位捕获这类仅需 data 重算的场景是纯浪费。lazy materialize 重算 op 时会重建 grad 链，
      *       故此处置空 grad + 重建 GradAccumulator，语义对齐 copy。
      * @date 2026-08-27 (RD start 22µs 归因优化)
