@@ -3153,3 +3153,17 @@ cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图
   generic=1+legacy=0 均 0.0985/97.1421%; 回归 118/0/ALL PASS
 - ④ 完整收口: FC+FFN 手写 pattern 均已被通用树式识别器等价覆盖(退场预演通过);
   默认切换 legacy=0 待浸泡(多轮 shadow + 跨测试矩阵)后执行
+
+
+## 4.106 2026-09-12 tanh 反向多节点图执行层缺陷专项(闭环, c3 4120eef)
+
+- 隔离实验二分(直接构建图→编译→执行, 绕过拦截层): 双 Exp+Sub 图产出 exp(-x)-exp(x),
+  tanh 值链图产出 coth —— 操作数交换特征; 排除 registry/拦截/喂入路径
+- 根因一: buildMultiNodeMLIR 2 槽池 round-robin 在 DAG 下读写冲突(exp_x/exp_nx 同槽,
+  后写覆盖前写) → liveness 检测冲突降级独占槽位
+- 根因二: elementwise 链融合「前驱换位 inputs[0]」对 Sub/Div 反转操作数(实测 coth 实证)
+  → 非交换且前驱不在 inputs[0] 断链, 交换律算子保持融合
+- 根因三(连带): scratch_size 分配与槽位布局两处硬编码不一致 → FFN G3 越界写崩溃
+  → computePoolBufCount 抽唯一真源
+- TanhNode 恢复: test_tanh_grad C3 路径梯度与期望全等; **test_autograd_v2 CPU 0 FAIL
+  (§4.98 遗留 2 FAIL 关闭)**; 全量回归 118/0/ALL PASS + MNIST/FFN 逐位不变
