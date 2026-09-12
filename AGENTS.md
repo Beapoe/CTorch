@@ -205,7 +205,7 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
 | **P1** | x86 AVX-512 实测未做 | 曙光智算机时充足 | Stage 5.4 |
 | ~~P1~~ | ~~hotpath SiLU 缺失~~ | ✅ 已修(立项 C, STATUS §4.74): makeNodeVariant/isSupportedOp/isUnaryOp/MatMulActivation + epilogue lowering 全补齐 | 残留仅"无 bias FFN fused_hit=0"这一既有 P1, 与 SiLU 正确性无关 |
 | **P2** | 非核心 standalone 红(pre-existing) | test_relu_backward(MPS 设备崩溃, 不经 C3)、test_region_fusion(性能退化类) | 独立立项; 与主线无交集 |
-| **P2** | test_autograd_v2 遗留 2 FAIL(relu 的 C3 反向 0.42 污染) | §4.98: grad 输入全 1、Gt lowering 正确、反向图正确, 但 C3 反向执行产物正数位置 0.42(疑 fused 序列跨测试喂入污染); leaky_relu 5 项已修 | 下一轮: suliluo-runtime-debugger 或 C3 反向执行层专项 |
+| ~~P2~~ | ~~test_autograd_v2 遗留 2 FAIL(tanh 的 C3 反向恒等/错位)~~ | ✅ **§4.106 tanh 专项闭环(c3 4120eef)**: 根因 = buildMultiNodeMLIR 2 槽池 DAG 读写冲突 + elementwise 链融合对 Sub/Div 换位; 修复后 test_tanh_grad C3 路径与期望全等, CPU 0 FAIL, TanhNode 恢复 supportsNodeType | - |
 | **P2** | test_autograd_v2 MPS 段设备异常崩溃 | §4.98 调试中发现: MPS 段 makeTensor(MPS) 后某些测试抛"张量设备类型不匹配"未捕获 → SIGABRT | 独立立项(与 MPS 设备兼容性相关) |
 | **P2** | Stage 1 伪 SIMD (8-wide + 标量 exp) | ops/SiLU.cpp 仍保留 | 可降级 fallback |
 | **P2** | 泛化融合已默认接管(G3 落地) | **接管默认开**(§4.88), 数值逐位一致(硬结论); 性能: 原记 FFN -2.7~-4.9% 经 §4.90 复核**复现失败**(实测持平) | 性能待干净环境重测(待办 #9); 后续: 手写 MIMO pattern 退场 |
@@ -295,4 +295,5 @@ cd /Users/ghostface/CTorch-optimize-AutoDiff
   firing MatMul 单图双输出规避 GraphMerger grad 不去重)
   - **FC+FFN 手写 pattern 均已被通用树式识别器等价覆盖(退场预演通过)**
   - MNIST generic=1 与 generic=1+legacy=0 均 0.0985/97.1421%; FFN 两模式 step0 1390.0156
-- 阶段二 v3(未开始): Tanh/Sigmoid 入白名单(依赖 tanh 执行层专项) → 浸泡 → 默认切换 legacy=0
+- 阶段二 v3(依赖已解除, 待做): Tanh/Sigmoid 入通用树白名单(tanh 专项 §4.106 已闭环,
+  恢复 TanhNode) → 浸泡 → 默认切换 legacy=0
