@@ -3099,3 +3099,13 @@ MNIST 97.1421%·0.0985 / FFN MIMO 正常 / fingerprint 3 / forward_capture 4。
 
 **待办增量**: compileMergedAsync watchdog(文档化取舍) / OrchestratedKernel
 cacheKey 语义 / MIMO 退场 / 环境守卫 / dot 反向 / RC2 / tanh 反向图执行层专项。
+
+
+## 4.101 2026-09-12 P2 收尾(cacheKey/watchdog 文档) + 环境守卫落地(⑤)
+
+- OrchestratedKernel cacheKey 语义化(子图 nodeCount 序列); compileMergedAsync
+  无 watchdog 的取舍文档化(c3 03a25d7)
+- **基准测试环境守卫 bench_guard.h(主仓)**: 每测量自动环境快照(load/机器 CPU),
+  报告 min/median/mean/CV; CV>15% 自动标注不可定案(§4.90 纪律工程化);
+  示范接入 bench_llama_ffn_train(实测 CV 7.1% 可定案)
+- 待办剩余: MIMO 退场 / dot 反向 / RC2 / tanh 反向图执行层专项
