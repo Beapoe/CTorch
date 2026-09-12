@@ -345,6 +345,7 @@ set(CT-Nodes
         src/AutoGrad/Nodes/CrossEntropyNode.cpp
         src/AutoGrad/Nodes/SoftmaxNode.cpp
         src/AutoGrad/Nodes/GradAccumulator.cpp
+        src/AutoGrad/Nodes/DotNode.cpp
         src/AutoGrad/Nodes/LogNode.cpp
         src/AutoGrad/Nodes/ExpNode.cpp
         src/AutoGrad/Nodes/AbsNode.cpp

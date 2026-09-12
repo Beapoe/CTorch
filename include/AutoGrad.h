@@ -23,6 +23,7 @@ class Node;
 #include "AutoGrad/Nodes/NegNode.h"
 #include "AutoGrad/Nodes/ReLUNode.h"
 #include "AutoGrad/Nodes/LReLUNode.h"
+#include "AutoGrad/Nodes/DotNode.h"
 #include "AutoGrad/Nodes/CosNode.h"
 #include "AutoGrad/Nodes/SinNode.h"
 #include "AutoGrad/Nodes/TanhNode.h"
@@ -138,6 +139,8 @@ namespace AutoGrad {
                 registerNode<MaxNode>(a, b, result_weak);
             } else if constexpr (OpType == op::SwiGLU) {  // PEL25 Stage 5.1: SwiGLU dispatch
                 registerNode<SwiGLUNode>(a, b, result_weak);
+            } else if constexpr (OpType == op::Dot) {  // [§4.97 ⑥] dot 反向断链修复
+                registerNode<DotNode>(a, b, result_weak);
             }
             if (result_ptr->getRelatedNode()) {
                 result.setRelatedNode(result_ptr->getRelatedNode());

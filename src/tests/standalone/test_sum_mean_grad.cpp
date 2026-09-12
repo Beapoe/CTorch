@@ -204,6 +204,32 @@ int main() {
         CHECK(okw, "w 梯度 = x 值");
     }
 
+    // Test: dot 反向断链回归(§4.97 ⑥)
+    {
+        AutoGrad::EnableGrad = true;
+        Tensor x(ShapeTag{}, {3}, DType::kFloat, DeviceType::kCPU);
+        Tensor w(ShapeTag{}, {3}, DType::kFloat, DeviceType::kCPU);
+        for (int i = 0; i < 3; ++i) {
+            x.data_write<float>()[i] = (float)(i + 1);
+            w.data_write<float>()[i] = 10.0f * (float)(i + 1);
+        }
+        x.requires_grad(true);
+        w.requires_grad(true);
+        Tensor y = x.dot(w);
+        CHECK(std::abs(y.item<float>() - (10.0f + 40.0f + 90.0f)) < 1e-4f, "dot 前向 = 140");
+        CHECK(y.getRelatedNode() != nullptr, "dot 挂节点(修复前为 null, 反向断链)");
+        AutoGrad::backward(y.getRelatedNode(), false);
+        const float* gx = x.grad_ptr();
+        const float* gw = w.grad_ptr();
+        CHECK(gx != nullptr, "dot 后 x 收到梯度(修复前无)");
+        bool okx = (gx != nullptr);
+        for (int i = 0; okx && i < 3; ++i) okx = (std::abs(gx[i] - 10.0f * (float)(i + 1)) < 1e-5f);
+        CHECK(okx, "dot grad_x = w");
+        bool okw = (gw != nullptr);
+        for (int i = 0; okw && i < 3; ++i) okw = (std::abs(gw[i] - (float)(i + 1)) < 1e-5f);
+        CHECK(okw, "dot grad_w = x");
+    }
+
     std::cout << (g_fails == 0 ? "=== ALL PASS ===" : "=== HAS FAIL ===") << "\n";
     return g_fails;
 }
